@@ -1,0 +1,411 @@
+earch, offline AsyncStorage support
+// ============================================================
+
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  TextInput,
+  Linking,
+  Alert,
+  FlatList,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+type FilterTab = 'All' | 'Police' | 'Women' | 'Medical' | 'Legal';
+
+interface HelplineContact {
+  id: string;
+  number: string;
+  name: string;
+  description: string;
+  category: FilterTab;
+  emoji: string;
+  color: string;
+  isCustom?: boolean;
+}
+
+// ── Static Data ───────────────────────────────────────────────────────────────
+const HELPLINES: HelplineContact[] = [
+  { id: '1', number: '112', name: 'All Emergency', description: 'National Emergency Number', category: 'Police', emoji: '🚨', color: colors.primary },
+  { id: '2', number: '1091', name: 'Women Helpline', description: 'National Women Helpline', category: 'Women', emoji: '👩', color: colors.secondary },
+  { id: '3', number: '100', name: 'Police', description: 'Local Police Emergency', category: 'Police', emoji: '👮', color: colors.accent },
+  { id: '4', number: '102', name: 'Ambulance', description: 'Medical Emergency', category: 'Medical', emoji: '🚑', color: colors.success },
+  { id: '5', number: '101', name: 'Fire Brigade', description: 'Fire Emergency', category: 'Medical', emoji: '🚒', color: colors.warning },
+  { id: '6', number: '181', name: 'Domestic Violence', description: 'Woman in Distress Helpline', category: 'Women', emoji: '🏠', color: '#FF6B6B' },
+  { id: '7', number: '1098', name: 'Child Helpline', description: 'Children in Need of Care', category: 'Women', emoji: '👶', color: '#FFA500' },
+  { id: '8', number: '15100', name: 'Legal Aid', description: 'Legal Services Authority', category: 'Legal', emoji: '⚖️', color: '#9B59B6' },
+  { id: '9', number: '1930', name: 'Cyber Crime', description: 'National Cyber Crime Helpline', category: 'Police', emoji: '💻', color: '#3498DB' },
+  { id: '10', number: '14567', name: 'Senior Citizen', description: 'Elder Helpline', category: 'Medical', emoji: '👴', color: '#27AE60' },
+  { id: '11', number: '1800-180-5522', name: 'Student Helpline', description: 'National Student Helpline', category: 'Legal', emoji: '🎓', color: '#E74C3C' },
+  { id: '12', number: '011-23978046', name: 'NIMHANS', description: 'Mental Health Support', category: 'Medical', emoji: '🧠', color: '#8E44AD' },
+];
+
+const FILTER_TABS: FilterTab[] = ['All', 'Police', 'Women', 'Medical', 'Legal'];
+
+// ── Component ─────────────────────────────────────────────────────────────────
+export default function ContactsScreen() {
+  const [activeFilter, setActiveFilter] = useState<FilterTab>('All');
+  const [searchText, setSearchText] = useState('');
+  const [customContacts, setCustomContacts] = useState<HelplineContact[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  // Add contact form state
+  const [newName, setNewName] = useState('');
+  const [newNumber, setNewNumber] = useState('');
+  const [newRelation, setNewRelation] = useState('');
+
+  useEffect(() => {
+    loadCustomContacts();
+  }, []);
+
+  const loadCustomContacts = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+      if (stored) setCustomContacts(JSON.parse(stored).filter((c: HelplineContact) => c.isCustom));
+    } catch (e) {
+      console.warn('Failed to load custom contacts:', e);
+    }
+  };
+
+  const callNumber = (number: string, name: string) => {
+    Alert.alert(`Call ${name}?`, `Dialing ${number}...`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: `Call ${number}`, onPress: () => Linking.openURL(`tel:${number}`) },
+    ]);
+  };
+
+  const addCustomContact = async () => {
+    if (!newName.trim() || !newNumber.trim()) {
+      Alert.alert('Error', 'Please enter name and number.');
+      return;
+    }
+    const contact: HelplineContact = {
+      id: Date.now().toString(),
+      number: newNumber.trim(),
+      name: newName.trim(),
+      description: newRelation.trim() || 'Custom Contact',
+      category: 'All',
+      emoji: '👤',
+      color: colors.accent,
+      isCustom: true,
+    };
+    const updated = [...customContacts, contact];
+    setCustomContacts(updated);
+    // Save to 'safeguard_trusted_contacts' so that SOS & Home screens can read them
+    const allStored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+    const existingHelpline = allStored
+      ? JSON.parse(allStored).filter((c: HelplineContact) => !c.isCustom)
+      : [];
+    await AsyncStorage.setItem(
+      'safeguard_trusted_contacts',
+      JSON.stringify([...existingHelpline, ...updated])
+    );
+    setNewName('');
+    setNewNumber('');
+    setNewRelation('');
+    setShowAddModal(false);
+  };
+
+  const deleteCustomContact = async (id: string) => {
+    const updated = customContacts.filter(c => c.id !== id);
+    setCustomContacts(updated);
+    // Keep non-custom entries intact in the shared key
+    const allStored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+    const existingHelpline = allStored
+      ? JSON.parse(allStored).filter((c: HelplineContact) => !c.isCustom)
+      : [];
+    await AsyncStorage.setItem(
+      'safeguard_trusted_contacts',
+      JSON.stringify([...existingHelpline, ...updated])
+    );
+  };
+
+  // Filter and search
+  const allContacts = [...HELPLINES, ...customContacts];
+  const filtered = allContacts.filter(c => {
+    const matchFilter = activeFilter === 'All' || c.category === activeFilter;
+    const matchSearch = !searchText ||
+      c.name.toLowerCase().includes(searchText.toLowerCase()) ||
+      c.number.includes(searchText);
+    return matchFilter && matchSearch;
+  });
+
+  const renderContact = ({ item }: { item: HelplineContact }) => (
+    <View style={[styles.contactCard, { borderLeftColor: item.color }]}>
+      <View style={[styles.contactIconCircle, { backgroundColor: item.color + '22' }]}>
+        <Text style={styles.contactEmoji}>{item.emoji}</Text>
+      </View>
+      <View style={styles.contactInfo}>
+        <Text style={styles.contactName}>{item.name}</Text>
+        <Text style={styles.contactDesc}>{item.description}</Text>
+        <Text style={[styles.contactNumber, { color: item.color }]}>{item.number}</Text>
+      </View>
+      <View style={styles.contactActions}>
+        <TouchableOpacity
+          style={[styles.callBtn, { backgroundColor: colors.primary }]}
+          onPress={() => callNumber(item.number, item.name)}
+        >
+          <Text style={styles.callBtnText}>📞</Text>
+        </TouchableOpacity>
+        {item.isCustom && (
+          <TouchableOpacity
+            style={styles.deleteBtn}
+            onPress={() => deleteCustomContact(item.id)}
+          >
+            <Text style={styles.deleteBtnText}>🗑️</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#FFEBEE', '#FCE4EC', '#FFF0F5']} style={StyleSheet.absoluteFillObject} />
+
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>📞 Emergency Contacts</Text>
+        <Text style={styles.headerSub}>Tap any number to call instantly</Text>
+      </View>
+
+      {/* Search */}
+      <View style={styles.searchRow}>
+        <View style={styles.searchContainer}>
+          <Text style={styles.searchIcon}>🔍</Text>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search contacts or numbers..."
+            placeholderTextColor={colors.textSecondary}
+            value={searchText}
+            onChangeText={setSearchText}
+          />
+          {searchText.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchText('')}>
+              <Text style={styles.clearText}>✕</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* Filter tabs */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+        <View style={styles.filterRow}>
+          {FILTER_TABS.map(tab => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.filterTab, activeFilter === tab && styles.filterTabActive]}
+              onPress={() => setActiveFilter(tab)}
+            >
+              <Text style={[styles.filterTabText, activeFilter === tab && styles.filterTabTextActive]}>
+                {tab}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
+
+      {/* Contact list */}
+      <FlatList
+        data={filtered}
+        keyExtractor={item => item.id}
+        renderItem={renderContact}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        ListEmptyComponent={
+          <Text style={styles.emptyText}>No contacts found.</Text>
+        }
+        ListFooterComponent={<View style={{ height: 100 }} />}
+      />
+
+      {/* Add custom contact button */}
+      <TouchableOpacity style={styles.addBtn} onPress={() => setShowAddModal(true)}>
+        <LinearGradient colors={[colors.primary, colors.accent]} style={styles.addGradient}>
+          <Text style={styles.addBtnText}>+ Add Custom Contact</Text>
+        </LinearGradient>
+      </TouchableOpacity>
+
+      {/* Add Contact bottom sheet */}
+      {showAddModal && (
+        <View style={styles.modalOverlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>Add Custom Contact</Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Name (e.g., Neha - Best Friend)"
+              placeholderTextColor={colors.textSecondary}
+              value={newName}
+              onChangeText={setNewName}
+            />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Phone number"
+              placeholderTextColor={colors.textSecondary}
+              value={newNumber}
+              onChangeText={setNewNumber}
+              keyboardType="phone-pad"
+            />
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Relation (e.g., Sister, Colleague)"
+              placeholderTextColor={colors.textSecondary}
+              value={newRelation}
+              onChangeText={setNewRelation}
+            />
+            <View style={styles.modalBtns}>
+              <TouchableOpacity style={styles.modalCancelBtn} onPress={() => setShowAddModal(false)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalSaveBtn} onPress={addCustomContact}>
+                <Text style={styles.modalSaveText}>Save ✅</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  header: {
+    paddingTop: 56,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+  },
+  headerTitle: { fontSize: 24, fontWeight: '800', color: colors.text },
+  headerSub: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
+  searchRow: { paddingHorizontal: spacing.lg, marginBottom: spacing.sm },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+  },
+  searchIcon: { fontSize: 16, marginRight: spacing.sm },
+  searchInput: { flex: 1, color: colors.text, paddingVertical: spacing.sm, fontSize: 14 },
+  clearText: { color: colors.textSecondary, fontSize: 14, padding: 4 },
+  filterScroll: { maxHeight: 50, marginBottom: spacing.sm },
+  filterRow: { flexDirection: 'row', paddingHorizontal: spacing.lg, gap: spacing.sm },
+  filterTab: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  filterTabActive: { backgroundColor: colors.secondary, borderColor: colors.border },
+  filterTabText: { color: colors.textSecondary, fontSize: 13, fontWeight: '600' },
+  filterTabTextActive: { color: colors.textLight },
+  listContent: { paddingHorizontal: spacing.lg, paddingTop: spacing.xs },
+  contactCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 4,
+  },
+  contactIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.md,
+  },
+  contactEmoji: { fontSize: 22 },
+  contactInfo: { flex: 1 },
+  contactName: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  contactDesc: { color: colors.textSecondary, fontSize: 11, marginTop: 1 },
+  contactNumber: { fontSize: 16, fontWeight: '800', marginTop: 2 },
+  contactActions: { flexDirection: 'row', gap: spacing.xs },
+  callBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callBtnText: { color: colors.textLight, fontSize: 18 },
+  deleteBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  deleteBtnText: { fontSize: 16 },
+  emptyText: { color: colors.textSecondary, textAlign: 'center', marginTop: spacing.xl },
+  addBtn: {
+    position: 'absolute',
+    bottom: 20,
+    left: spacing.lg,
+    right: spacing.lg,
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+  },
+  addGradient: { paddingVertical: spacing.md, alignItems: 'center' },
+  addBtnText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  // Modal
+  modalOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'flex-end',
+    padding: spacing.lg,
+  },
+  modal: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modalTitle: { color: colors.text, fontSize: 18, fontWeight: '700', marginBottom: spacing.md },
+  modalInput: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    color: colors.text,
+    marginBottom: spacing.sm,
+    fontSize: 14,
+  },
+  modalBtns: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  modalCancelBtn: {
+    flex: 1,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  modalCancelText: { color: colors.textSecondary, fontSize: 14 },
+  modalSaveBtn: {
+    flex: 2,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+  },
+  modalSaveText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+});
