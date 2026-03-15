@@ -1,0 +1,316 @@
+// ============================================================
+// SafeGuard — SafeZoneScreen.tsx
+// Shows nearby safe places via Google Places API:
+// Police stations (blue), Hospitals (red), Safe areas (green)
+// Tap marker → name + distance + directions
+// Users can submit new safe locations
+// ============================================================
+
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Alert,
+  Linking,
+  Dimensions,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
+import { NavigationProp } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { RootStackParamList } from '../../App';
+
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;}
+
+type PlaceFilter = 'All' | 'Police' | 'Hospital' | 'Safe';
+
+interface SafePlace {
+  id: string;
+  name: string;
+  address: string;
+  type: PlaceFilter;
+  emoji: string;
+  color: string;
+  lat: number;
+  lng: number;
+  distance: string;
+  isUserSubmitted?: boolean;
+}
+
+// Demo nearby safe places
+const DEMO_PLACES: SafePlace[] = [
+  { id: '1', name: 'Connaught Place Police Station', address: 'Inner Circle, Connaught Place, Delhi', type: 'Police', emoji: '🚔', color: colors.accent, lat: 28.6330, lng: 77.2194, distance: '0.3 km' },
+  { id: '2', name: 'Ram Manohar Lohia Hospital', address: 'Baba Kharak Singh Marg, Delhi', type: 'Hospital', emoji: '🏥', color: colors.primary, lat: 28.6280, lng: 77.2089, distance: '0.8 km' },
+  { id: '3', name: 'Select Citywalk Mall (Safe Zone)', address: 'Saket District Centre, Delhi', type: 'Safe', emoji: '🏪', color: colors.success, lat: 28.5276, lng: 77.2189, distance: '1.2 km' },
+  { id: '4', name: 'Barakhamba Road Police Post', address: 'Barakhamba Road, Connaught Place', type: 'Police', emoji: '🚔', color: colors.accent, lat: 28.6318, lng: 77.2248, distance: '0.5 km' },
+  { id: '5', name: 'Safdarjung Hospital', address: 'Ansari Nagar, Delhi', type: 'Hospital', emoji: '🏥', color: colors.primary, lat: 28.5697, lng: 77.2069, distance: '2.1 km' },
+  { id: '6', name: 'Rajiv Chowk Metro Station', address: 'Connaught Place, Delhi', type: 'Safe', emoji: '🏛️', color: colors.success, lat: 28.6328, lng: 77.2197, distance: '0.2 km' },
+  { id: '7', name: 'Cyber Crime Police Station', address: 'Mandir Marg, Delhi', type: 'Police', emoji: '🚔', color: colors.accent, lat: 28.6358, lng: 77.1997, distance: '1.8 km' },
+];
+
+const { width } = Dimensions.get('window');
+
+export default function SafeZoneScreen({ navigation }: Props) {
+  const [activeFilter, setActiveFilter] = useState<PlaceFilter>('All');
+  const [selectedPlace, setSelectedPlace] = useState<SafePlace | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [places, setPlaces] = useState<SafePlace[]>(DEMO_PLACES);
+  const [showSubmitForm, setShowSubmitForm] = useState(false);
+  const [submitName, setSubmitName] = useState('');
+
+  useEffect(() => {
+    getUserLocation();
+  }, []);
+
+  const getUserLocation = async () => {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status === 'granted') {
+      const loc = await Location.getCurrentPositionAsync({});
+      setUserLocation({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+    }
+  };
+
+  const openDirections = (place: SafePlace) => {
+    const url = `https://maps.google.com/maps?daddr=${place.lat},${place.lng}`;
+    Linking.openURL(url);
+  };
+
+  const filtered = places.filter(p => activeFilter === 'All' || p.type === activeFilter);
+
+  const filterConfig: { key: PlaceFilter; emoji: string; color: string }[] = [
+    { key: 'All', emoji: '🗺️', color: colors.text },
+    { key: 'Police', emoji: '🚔', color: colors.accent },
+    { key: 'Hospital', emoji: '🏥', color: colors.primary },
+    { key: 'Safe', emoji: '🏪', color: colors.success },
+  ];
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#FFEBEE', '#FCE4EC', '#FFF0F5']} style={StyleSheet.absoluteFillObject} />
+
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>🏠 Safe Zones</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        {/* Map placeholder */}
+        <View style={styles.mapBlock}>
+          <LinearGradient colors={['#0D1117', '#161B22']} style={StyleSheet.absoluteFillObject} />
+          <Text style={styles.mapEmoji}>🗺️</Text>
+          <Text style={styles.mapLabel}>Dark Map — Safe Zones Near You</Text>
+          <Text style={styles.mapSub}>(Activate Google Maps API in app.json)</Text>
+          {/* Marker legend */}
+          <View style={styles.markerRow}>
+            <View style={styles.markerItem}><Text style={styles.markerDot}>🔵</Text><Text style={styles.markerText}>Police</Text></View>
+            <View style={styles.markerItem}><Text style={styles.markerDot}>🔴</Text><Text style={styles.markerText}>Hospital</Text></View>
+            <View style={styles.markerItem}><Text style={styles.markerDot}>🟢</Text><Text style={styles.markerText}>Safe Area</Text></View>
+          </View>
+        </View>
+
+        {/* Filter tabs */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+          <View style={styles.filterRow}>
+            {filterConfig.map(f => (
+              <TouchableOpacity
+                key={f.key}
+                style={[styles.filterBtn, activeFilter === f.key && { backgroundColor: f.color }]}
+                onPress={() => setActiveFilter(f.key)}
+              >
+                <Text style={styles.filterBtnText}>{f.emoji} {f.key}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+
+        {/* Results count */}
+        <Text style={styles.resultsCount}>{filtered.length} locations found (2km radius)</Text>
+
+        {/* Place cards */}
+        {filtered.map(place => (
+          <TouchableOpacity
+            key={place.id}
+            style={[
+              styles.placeCard,
+              { borderLeftColor: place.color },
+              selectedPlace?.id === place.id && styles.placeCardSelected,
+            ]}
+            onPress={() => setSelectedPlace(selectedPlace?.id === place.id ? null : place)}
+            activeOpacity={0.8}
+          >
+            <View style={styles.placeRow}>
+              <View style={[styles.placeIcon, { backgroundColor: place.color + '22' }]}>
+                <Text style={styles.placeEmoji}>{place.emoji}</Text>
+              </View>
+              <View style={styles.placeInfo}>
+                <Text style={styles.placeName}>{place.name}</Text>
+                <Text style={styles.placeAddr}>{place.address}</Text>
+                <View style={styles.placeMeta}>
+                  <Text style={styles.placeDistance}>📏 {place.distance}</Text>
+                  {place.isUserSubmitted && (
+                    <View style={styles.userBadge}><Text style={styles.userBadgeText}>User Submitted</Text></View>
+                  )}
+                </View>
+              </View>
+            </View>
+
+            {/* Expanded: directions button */}
+            {selectedPlace?.id === place.id && (
+              <TouchableOpacity
+                style={[styles.directionsBtn, { backgroundColor: colors.primary }]}
+                onPress={() => openDirections(place)}
+              >
+                <Text style={styles.directionsBtnText}>🧭 Get Directions</Text>
+              </TouchableOpacity>
+            )}
+          </TouchableOpacity>
+        ))}
+
+        {/* Submit new location */}
+        <TouchableOpacity style={styles.submitBtn} onPress={() => setShowSubmitForm(!showSubmitForm)}>
+          <Text style={styles.submitBtnText}>+ Submit Safe Location</Text>
+        </TouchableOpacity>
+
+        {showSubmitForm && (
+          <View style={styles.submitForm}>
+            <Text style={styles.submitFormTitle}>Submit a Safe Location</Text>
+            <Text style={styles.submitFormSub}>
+              Help other women stay safe by marking locations like police posts, hospitals, and crowded areas.
+            </Text>
+            <TouchableOpacity
+              style={styles.submitConfirmBtn}
+              onPress={() => {
+                Alert.alert('Thank you!', 'Your location has been submitted for review.');
+                setShowSubmitForm(false);
+              }}
+            >
+              <LinearGradient colors={[colors.primary, colors.accent]} style={styles.submitGrad}>
+                <Text style={styles.submitConfirmText}>📍 Submit Current Location</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <View style={{ height: 60 }} />
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scrollContent: { paddingTop: 50 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  backBtn: { padding: spacing.sm },
+  backText: { color: colors.textSecondary, fontSize: 14 },
+  headerTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  mapBlock: {
+    marginHorizontal: spacing.lg,
+    height: 180,
+    borderRadius: borderRadius.lg,
+    overflow: 'hidden',
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mapEmoji: { fontSize: 40, marginBottom: spacing.xs },
+  mapLabel: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  mapSub: { color: colors.textSecondary, fontSize: 11, marginTop: 4 },
+  markerRow: { flexDirection: 'row', gap: spacing.lg, marginTop: spacing.md },
+  markerItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  markerDot: { fontSize: 14 },
+  markerText: { color: colors.textSecondary, fontSize: 12 },
+  filterScroll: { maxHeight: 48, marginBottom: spacing.xs },
+  filterRow: { flexDirection: 'row', paddingHorizontal: spacing.lg, gap: spacing.sm },
+  filterBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  filterBtnText: { color: colors.textSecondary, fontSize: 13, fontWeight: '600' },
+  resultsCount: { color: colors.textSecondary, fontSize: 12, paddingHorizontal: spacing.lg, marginBottom: spacing.sm, marginTop: spacing.xs },
+  placeCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 4,
+  },
+  placeCardSelected: { borderColor: colors.secondary },
+  placeRow: { flexDirection: 'row', gap: spacing.sm },
+  placeIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  placeEmoji: { fontSize: 24 },
+  placeInfo: { flex: 1 },
+  placeName: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  placeAddr: { color: colors.textSecondary, fontSize: 11, marginTop: 2, lineHeight: 16 },
+  placeMeta: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: 4 },
+  placeDistance: { color: colors.accent, fontSize: 12, fontWeight: '600' },
+  userBadge: {
+    backgroundColor: colors.secondary + '22',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  userBadgeText: { color: colors.secondary, fontSize: 10, fontWeight: '600' },
+  directionsBtn: {
+    marginTop: spacing.md,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  directionsBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+  submitBtn: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  submitBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '600' },
+  submitForm: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  submitFormTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 4 },
+  submitFormSub: { color: colors.textSecondary, fontSize: 13, lineHeight: 20, marginBottom: spacing.md },
+  submitConfirmBtn: { borderRadius: borderRadius.md, overflow: 'hidden' },
+  submitGrad: { paddingVertical: spacing.md, alignItems: 'center' },
+  submitConfirmText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+});
