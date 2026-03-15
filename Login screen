@@ -1,0 +1,434 @@
+// ============================================================
+// SafeGuard — LoginScreen.tsx
+// Custom auth: phone → OTP → verify → upsert user → session
+// New users are prompted for their name before proceeding.
+// ============================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  Animated,
+  Dimensions,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StatusBar,
+} from 'react-native';
+import { NavigationProp } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { RootStackParamList } from '../../App';
+import {
+  generateOtp,
+  verifyOtp,
+  getUserByPhone,
+  upsertUser,
+  saveSession,
+} from '../lib/auth';
+
+// ── Props ─────────────────────────────────────────────────────
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;
+}
+
+const { width } = Dimensions.get('window');
+
+// ── Step type ─────────────────────────────────────────────────
+type Step = 'phone' | 'otp' | 'register';
+
+export default function LoginScreen({ navigation, onLogin }: Props) {
+  // ── State ──────────────────────────────────────────────────
+  const [step, setStep] = useState<Step>('phone');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [otp, setOtp] = useState('');
+  const [name, setName] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
+
+  // ── Animations ─────────────────────────────────────────────
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const stepAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: true,
+    }).start();
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 1.05, duration: 1500, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 1500, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+
+  // Fade in whenever step changes
+  const animateStepIn = () => {
+    stepAnim.setValue(0);
+    Animated.timing(stepAnim, {
+      toValue: 1,
+      duration: 350,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const goToStep = (next: Step) => {
+    setStep(next);
+    animateStepIn();
+  };
+
+  // ── Step 1 — Send OTP ──────────────────────────────────────
+  const handleSendOtp = async () => {
+    if (phoneNumber.length !== 10) {
+      Alert.alert('Invalid Number', 'Please enter a valid 10-digit phone number.');
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      const generatedOtp = await generateOtp(phoneNumber);
+
+      // In production replace this log with your SMS provider call
+      console.log(`[SafeGuard] OTP for ${phoneNumber}: ${generatedOtp}`);
+
+      // ── DEV ONLY: show OTP in an alert so you can test without SMS ──
+      Alert.alert('OTP Sent 📲', `Demo OTP: ${generatedOtp}\n\n(Remove this alert in production)`);
+
+      goToStep('otp');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Failed to send OTP. Please try again.');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // ── Step 2 — Verify OTP ────────────────────────────────────
+  const handleVerifyOtp = async () => {
+    if (otp.length !== 4) {
+      Alert.alert('Invalid OTP', 'Please enter the 4-digit OTP.');
+      return;
+    }
+
+    setIsVerifying(true);
+    try {
+      const result = await verifyOtp(phoneNumber, otp);
+
+      if (!result.success) {
+        Alert.alert('Verification Failed', result.reason);
+        return;
+      }
+
+      // OTP correct — check if user already exists
+      const existingUser = await getUserByPhone(phoneNumber);
+
+      if (existingUser) {
+        // ✅ Known user — straight to Main
+        await saveSession(existingUser);
+        onLogin();
+        navigation.reset({ index: 0, routes: [{ name: 'Main' }] });
+      } else {
+        // 🆕 New user — collect name first
+        goToStep('register');
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Verification failed. Please try again.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // ── Step 3 — Register new user ─────────────────────────────
+  const handleRegister = async () => {
+    if (name.trim().length < 2) {
+      Alert.alert('Name Required', 'Please enter your full name (at least 2 characters).');
+      return;
+    }
+
+    setIsRegistering(true);
+    try {
+      // Create user in the local user table; pushToken is empty for now —
+      // update it later once Expo Notifications gives you the token.
+      const user = await upsertUser(phoneNumber, name.trim(), '');
+      await saveSession(user);
+
+      onLogin();
+      navigation.reset({ index: 0, routes: [{ name: 'Main' }] });
+    } catch (e: any) {
+      Alert.alert('Registration Error', e?.message ?? 'Could not create your profile.');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
+  // ── UI helpers ─────────────────────────────────────────────
+  const handleResendOtp = () => {
+    setOtp('');
+    handleSendOtp();
+  };
+
+  const handleChangeNumber = () => {
+    setOtp('');
+    goToStep('phone');
+  };
+
+  // ── Render ─────────────────────────────────────────────────
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <StatusBar barStyle="light-content" backgroundColor={colors.background} />
+
+      {/* Background gradient effect via nested Views */}
+      <View style={styles.bgGradient} />
+
+      <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
+        {/* ── Logo ── */}
+        <Animated.View style={[styles.logoContainer, { transform: [{ scale: pulseAnim }] }]}>
+          <View style={styles.logoCircle}>
+            <Text style={styles.logoEmoji}>🛡️</Text>
+          </View>
+          <Text style={styles.appName}>SafeGuard</Text>
+          <Text style={styles.tagline}>Your personal safety companion</Text>
+        </Animated.View>
+
+        <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          <Animated.View style={[styles.card, { opacity: step === 'phone' ? 1 : stepAnim }]}>
+            <Text style={styles.cardTitle}>
+              {step === 'phone' && 'Sign In'}
+              {step === 'otp' && 'Enter OTP'}
+              {step === 'register' && 'Create Profile'}
+            </Text>
+
+            {/* ── Step 1: Phone ── */}
+            {step === 'phone' && (
+              <>
+                <Text style={styles.stepHint}>
+                  We'll send a one-time code to verify your number.
+                </Text>
+                <View style={styles.phoneInputRow}>
+                  <View style={styles.countryCode}>
+                    <Text style={styles.countryCodeText}>🇮🇳 +91</Text>
+                  </View>
+                  <TextInput
+                    style={styles.phoneInput}
+                    placeholder="10-digit phone number"
+                    placeholderTextColor={colors.textSecondary}
+                    value={phoneNumber}
+                    onChangeText={setPhoneNumber}
+                    keyboardType="phone-pad"
+                    maxLength={10}
+                  />
+                </View>
+                <TouchableOpacity
+                  style={[styles.primaryBtn, isSending && styles.btnDisabled]}
+                  onPress={handleSendOtp}
+                  disabled={isSending}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {isSending ? 'Sending…' : 'Send OTP 📲'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {/* ── Step 2: OTP ── */}
+            {step === 'otp' && (
+              <>
+                <Text style={styles.otpSubtitle}>
+                  OTP sent to{' '}
+                  <Text style={styles.highlight}>+91 {phoneNumber}</Text>
+                </Text>
+
+                <TextInput
+                  style={styles.otpInput}
+                  placeholder="- - - -"
+                  placeholderTextColor={colors.textSecondary}
+                  value={otp}
+                  onChangeText={setOtp}
+                  keyboardType="number-pad"
+                  maxLength={4}
+                  autoFocus
+                />
+
+                <TouchableOpacity
+                  style={[styles.primaryBtn, isVerifying && styles.btnDisabled]}
+                  onPress={handleVerifyOtp}
+                  disabled={isVerifying}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {isVerifying ? 'Verifying…' : 'Verify OTP ✅'}
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={styles.otpActionsRow}>
+                  <TouchableOpacity onPress={handleResendOtp} disabled={isSending}>
+                    <Text style={styles.linkText}>
+                      {isSending ? 'Resending…' : '🔄 Resend OTP'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={handleChangeNumber}>
+                    <Text style={styles.linkText}>✏️ Change Number</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+
+            {/* ── Step 3: Register ── */}
+            {step === 'register' && (
+              <>
+                <Text style={styles.stepHint}>
+                  Welcome! Please tell us your name to complete setup.
+                </Text>
+
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="Your full name"
+                  placeholderTextColor={colors.textSecondary}
+                  value={name}
+                  onChangeText={setName}
+                  autoCapitalize="words"
+                  autoFocus
+                />
+
+                <TouchableOpacity
+                  style={[styles.primaryBtn, isRegistering && styles.btnDisabled]}
+                  onPress={handleRegister}
+                  disabled={isRegistering}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {isRegistering ? 'Creating profile…' : 'Get Started 🚀'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </Animated.View>
+
+          {/* Step indicator */}
+          <View style={styles.dotsRow}>
+            {(['phone', 'otp', 'register'] as Step[]).map((s) => (
+              <View
+                key={s}
+                style={[styles.dot, step === s && styles.dotActive]}
+              />
+            ))}
+          </View>
+        </ScrollView>
+
+        <Text style={styles.bottomNote}>
+          🔒 Your data is stored only on your device
+        </Text>
+      </Animated.View>
+    </KeyboardAvoidingView>
+  );
+}
+
+// ── Styles ────────────────────────────────────────────────────
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  bgGradient: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.background,
+  },
+  content: { flex: 1, paddingHorizontal: spacing.lg, paddingTop: 60 },
+
+  // Logo
+  logoContainer: { alignItems: 'center', marginBottom: spacing.xl },
+  logoCircle: {
+    width: 90, height: 90, borderRadius: 45,
+    backgroundColor: colors.card, borderWidth: 2, borderColor: colors.primary,
+    alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm,
+    shadowColor: colors.primary, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6, shadowRadius: 20, elevation: 10,
+  },
+  logoEmoji: { fontSize: 42 },
+  appName: { fontSize: 34, fontWeight: '900', color: colors.primary, letterSpacing: 2 },
+  tagline: { fontSize: 13, color: colors.textSecondary, marginTop: 4 },
+
+  // Card
+  card: {
+    backgroundColor: colors.card, borderRadius: borderRadius.lg,
+    padding: spacing.lg, borderWidth: 1, borderColor: colors.border, marginBottom: spacing.md,
+  },
+  cardTitle: { ...typography.h2, textAlign: 'center', marginBottom: spacing.sm },
+  stepHint: {
+    color: colors.textSecondary, fontSize: 13, textAlign: 'center',
+    marginBottom: spacing.md, lineHeight: 20,
+  },
+
+  // Phone input
+  phoneInputRow: { flexDirection: 'row', marginBottom: spacing.md, gap: spacing.sm },
+  countryCode: {
+    backgroundColor: colors.background, borderRadius: borderRadius.sm,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: spacing.md, justifyContent: 'center',
+  },
+  countryCodeText: { color: colors.text, fontSize: 14 },
+  phoneInput: {
+    flex: 1, backgroundColor: colors.background, borderRadius: borderRadius.sm,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    color: colors.text, fontSize: 16,
+  },
+
+  // Generic text input (for name)
+  textInput: {
+    backgroundColor: colors.background, borderRadius: borderRadius.sm,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    color: colors.text, fontSize: 16, marginBottom: spacing.md,
+  },
+
+  // OTP input
+  otpSubtitle: {
+    color: colors.textSecondary, fontSize: 14,
+    textAlign: 'center', marginBottom: spacing.md,
+  },
+  highlight: { color: colors.primary, fontWeight: '700' },
+  otpInput: {
+    backgroundColor: colors.background, borderRadius: borderRadius.sm,
+    borderWidth: 1, borderColor: colors.primary,
+    paddingHorizontal: spacing.md, paddingVertical: spacing.md,
+    color: colors.text, fontSize: 28, fontWeight: '700',
+    textAlign: 'center', letterSpacing: 12, marginBottom: spacing.md,
+  },
+  otpActionsRow: {
+    flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.xs,
+  },
+  linkText: { color: colors.accent, fontSize: 13, textDecorationLine: 'underline' },
+
+  // Buttons
+  primaryBtn: {
+    backgroundColor: colors.primary, borderRadius: borderRadius.md,
+    paddingVertical: spacing.md, alignItems: 'center', marginBottom: spacing.md,
+    shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4, shadowRadius: 10, elevation: 8,
+  },
+  btnDisabled: { opacity: 0.6 },
+  primaryBtnText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+
+  // Step dots
+  dotsRow: {
+    flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: spacing.md,
+  },
+  dot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: colors.border,
+  },
+  dotActive: { backgroundColor: colors.primary, width: 24 },
+
+  // Bottom
+  bottomNote: {
+    color: colors.textSecondary, fontSize: 12,
+    textAlign: 'center', marginTop: spacing.sm, marginBottom: spacing.xl,
+  },
+});
