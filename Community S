@@ -1,0 +1,521 @@
+// 3 tabs: Safety Map | Self-Defense Tips | Help Me
+// Safety Map: dark map with danger/safe zone markers
+// Self-Defense: offline tips in Hindi & English
+// Help Me: anonymous alert to nearby users
+// ============================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Animated,
+  Alert,
+  Dimensions,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+
+const { width } = Dimensions.get('window');
+type CommunityTab = 'map' | 'tips' | 'help';
+type Language = 'en' | 'hi';
+
+interface SelfDefenseTip {
+  id: string;
+  title: string;
+  titleHi: string;
+  emoji: string;
+  steps: string[];
+  stepsHi: string[];
+  color: string;
+}
+
+const SELF_DEFENSE_TIPS: SelfDefenseTip[] = [
+  {
+    id: '1',
+    title: 'Grip Break',
+    titleHi: 'पकड़ तोड़ना',
+    emoji: '✊',
+    steps: [
+      'Circle your arm toward the thumb side',
+      'Apply force toward the weak point',
+      'Pull fast and sharp',
+      'Run immediately and call 112',
+    ],
+    stepsHi: [
+      'अपना हाथ अंगूठे की तरफ मोड़ें',
+      'कमजोर कोण पर जोर लगाएं',
+      'तेज़ झटके से खींचें',
+      'तुरंत भागें और 112 पर कॉल करें',
+    ],
+    color: colors.primary,
+  },
+  {
+    id: '2',
+    title: 'Knee Strike',
+    titleHi: 'घुटने की मार',
+    emoji: '🦵',
+    steps: [
+      'Stay close to the attacker',
+      'Bring your knee up quickly',
+      'Strike hard at groin area',
+      'Run and call 112 immediately',
+    ],
+    stepsHi: [
+      'हमलावर के पास रहें',
+      'अपना घुटना तेज़ी से ऊपर उठाएं',
+      'कमर के नीचे जोरदार मारें',
+      'तुरंत भागें और 112 पर कॉल करें',
+    ],
+    color: colors.warning,
+  },
+  {
+    id: '3',
+    title: 'Eye Attack',
+    titleHi: 'आंखों पर हमला',
+    emoji: '👁️',
+    steps: [
+      'Point your fingers forward',
+      'Push firmly on the eyes',
+      'This disorients the attacker',
+      'Run away immediately',
+    ],
+    stepsHi: [
+      'उंगलियां आगे की तरफ रखें',
+      'आंखों पर जोर से दबाएं',
+      'यह हमलावर को चकरा देता है',
+      'तुरंत भाग जाएं',
+    ],
+    color: colors.accent,
+  },
+  {
+    id: '4',
+    title: 'Phone as SOS',
+    titleHi: 'फोन को SOS बनाएं',
+    emoji: '📱',
+    steps: [
+      'Open SafeGuard SOS button',
+      'Press volume button 3 times quickly',
+      'Shout "Call 112" loudly',
+      'Stay on the line with emergency',
+    ],
+    stepsHi: [
+      'SafeGuard SOS बटन खोलें',
+      'वॉल्यूम बटन को 3 बार तेज़ी से दबाएं',
+      'ज़ोर से चिल्लाएं "112 पर कॉल करो"',
+      'इमरजेंसी से लाइन पर रहें',
+    ],
+    color: colors.secondary,
+  },
+  {
+    id: '5',
+    title: 'Keys as Weapon',
+    titleHi: 'चाबी को हथियार बनाएं',
+    emoji: '🔑',
+    steps: [
+      'Hold keys between fingers tightly',
+      'Swing bag hard to create space',
+      'Shout HELP loudly in public',
+      'Run to nearest crowded place',
+    ],
+    stepsHi: [
+      'चाबियां उंगलियों के बीच कसकर पकड़ें',
+      'बैग को जोर से घुमाकर जगह बनाएं',
+      'सार्वजनिक जगह पर जोर से "मदद" चिल्लाएं',
+      'नजदीकी भीड़-भाड़ वाली जगह भागें',
+    ],
+    color: colors.success,
+  },
+];
+
+// Demo map markers
+const DEMO_MARKERS = [
+  { id: '1', lat: 28.6139, lng: 77.2090, type: 'danger', label: 'Reported unsafe area', time: '2h ago', votes: 12 },
+  { id: '2', lat: 28.6159, lng: 77.2110, type: 'caution', label: 'Poorly lit street', time: '5h ago', votes: 7 },
+  { id: '3', lat: 28.6119, lng: 77.2070, type: 'safe', label: 'Police picket nearby', time: '1h ago', votes: 23 },
+  { id: '4', lat: 28.6145, lng: 77.2080, type: 'danger', label: 'Eve-teasing reported', time: '30m ago', votes: 18 },
+];
+
+export default function CommunityScreen() {
+  const [activeTab, setActiveTab] = useState<CommunityTab>('map');
+  const [language, setLanguage] = useState<Language>('en');
+  const [expandedTip, setExpandedTip] = useState<string | null>(null);
+  const [helpCount, setHelpCount] = useState(0);
+  const [helpSent, setHelpSent] = useState(false);
+  const [isLoadingHelp, setIsLoadingHelp] = useState(false);
+  const helpPulse = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    startHelpPulse();
+  }, []);
+
+  const startHelpPulse = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(helpPulse, { toValue: 1.08, duration: 800, useNativeDriver: true }),
+        Animated.timing(helpPulse, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    ).start();
+  };
+
+  const handleHelpMe = async () => {
+    setIsLoadingHelp(true);
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    setTimeout(() => {
+      const count = Math.floor(Math.random() * 12) + 3;
+      setHelpCount(count);
+      setHelpSent(true);
+      setIsLoadingHelp(false);
+      // In production: write to Firebase helpRequests collection,
+      // cloud function triggers notification to nearby users within 500m
+    }, 1500);
+  };
+
+  const markerColor = (type: string) => {
+    if (type === 'danger') return colors.primary;
+    if (type === 'caution') return colors.warning;
+    return colors.success;
+  };
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#FFEBEE', '#FCE4EC', '#FFF0F5']} style={StyleSheet.absoluteFillObject} />
+
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>🌍 Community Safety</Text>
+      </View>
+
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        {(['map', 'tips', 'help'] as CommunityTab[]).map(tab => (
+          <TouchableOpacity
+            key={tab}
+            style={[styles.tab, activeTab === tab && styles.tabActive]}
+            onPress={() => setActiveTab(tab)}
+          >
+            <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
+              {tab === 'map' ? '🗺️ Safety Map' : tab === 'tips' ? '🥋 Self Defense' : '🆘 Help Me'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* ── TAB: Safety Map ──────────────────────────────────────────────── */}
+      {activeTab === 'map' && (
+        <ScrollView contentContainerStyle={styles.tabContent} showsVerticalScrollIndicator={false}>
+          {/* Map placeholder (react-native-maps would render here) */}
+          <View style={styles.mapPlaceholder}>
+            <LinearGradient colors={['#2D3825', '#414535']} style={StyleSheet.absoluteFillObject} />
+            <Text style={styles.mapPlaceholderText}>🗺️</Text>
+            <Text style={styles.mapPlaceholderLabel}>Dark Safety Map</Text>
+            <Text style={styles.mapPlaceholderSub}>
+              (Requires react-native-maps + Google Maps API key configured in app.json)
+            </Text>
+            {/* Simulated markers */}
+            <View style={styles.markerLegend}>
+              <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.primary }]} /><Text style={styles.legendText}>Danger Zone</Text></View>
+              <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.warning }]} /><Text style={styles.legendText}>Caution Area</Text></View>
+              <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.success }]} /><Text style={styles.legendText}>Safe Zone</Text></View>
+            </View>
+          </View>
+
+          {/* Recent reports */}
+          <Text style={styles.sectionTitle}>📋 Community Reports</Text>
+          {DEMO_MARKERS.map(m => (
+            <View key={m.id} style={[styles.reportCard, { borderLeftColor: markerColor(m.type) }]}>
+              <View style={styles.reportLeft}>
+                <View style={[styles.reportDot, { backgroundColor: markerColor(m.type) }]} />
+                <View>
+                  <Text style={styles.reportLabel}>{m.label}</Text>
+                  <Text style={styles.reportTime}>{m.time} · {m.votes} reports</Text>
+                </View>
+              </View>
+              <View style={styles.voteRow}>
+                <TouchableOpacity style={styles.voteBtn}><Text style={styles.voteText}>👍</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.voteBtn}><Text style={styles.voteText}>👎</Text></TouchableOpacity>
+              </View>
+            </View>
+          ))}
+
+          {/* Report button */}
+          <TouchableOpacity
+            style={styles.reportAddBtn}
+            onPress={() => Alert.alert('Report Area', 'Mark the current location as unsafe?', [
+              { text: 'Cancel' },
+              { text: 'Report ⚠️', onPress: () => Alert.alert('Thank you!', 'Your report has been submitted.') },
+            ])}
+          >
+            <Text style={styles.reportAddText}>⚠️ Report Unsafe Area</Text>
+          </TouchableOpacity>
+
+          <View style={{ height: 80 }} />
+        </ScrollView>
+      )}
+
+      {/* ── TAB: Self Defense ─────────────────────────────────────────────── */}
+      {activeTab === 'tips' && (
+        <ScrollView contentContainerStyle={styles.tabContent} showsVerticalScrollIndicator={false}>
+          {/* Lang toggle */}
+          <View style={styles.langRow}>
+            <TouchableOpacity
+              style={[styles.langBtn, language === 'en' && styles.langBtnActive]}
+              onPress={() => setLanguage('en')}
+            >
+              <Text style={[styles.langText, language === 'en' && styles.langTextActive]}>🇬🇧 English</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.langBtn, language === 'hi' && styles.langBtnActive]}
+              onPress={() => setLanguage('hi')}
+            >
+              <Text style={[styles.langText, language === 'hi' && styles.langTextActive]}>🇮🇳 हिंदी</Text>
+            </TouchableOpacity>
+          </View>
+
+          {SELF_DEFENSE_TIPS.map(tip => (
+            <TouchableOpacity
+              key={tip.id}
+              style={[styles.tipCard, { borderLeftColor: tip.color }]}
+              onPress={() => setExpandedTip(expandedTip === tip.id ? null : tip.id)}
+              activeOpacity={0.8}
+            >
+              <View style={styles.tipHeader}>
+                <View style={[styles.tipIconCircle, { backgroundColor: tip.color + '22' }]}>
+                  <Text style={styles.tipEmoji}>{tip.emoji}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.tipTitle, { color: tip.color }]}>
+                    {language === 'en' ? tip.title : tip.titleHi}
+                  </Text>
+                  <Text style={styles.tipSub}>Tap to expand</Text>
+                </View>
+                <Text style={styles.tipArrow}>{expandedTip === tip.id ? '▲' : '▼'}</Text>
+              </View>
+              {expandedTip === tip.id && (
+                <View style={styles.tipSteps}>
+                  {(language === 'en' ? tip.steps : tip.stepsHi).map((step, i) => (
+                    <View key={i} style={styles.stepRow}>
+                      <View style={[styles.stepNum, { backgroundColor: tip.color }]}>
+                        <Text style={styles.stepNumText}>{i + 1}</Text>
+                      </View>
+                      <Text style={styles.stepText}>{step}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </TouchableOpacity>
+          ))}
+          <View style={{ height: 80 }} />
+        </ScrollView>
+      )}
+
+      {/* ── TAB: Help Me ─────────────────────────────────────────────────── */}
+      {activeTab === 'help' && (
+        <View style={styles.helpCenterContent}>
+          {!helpSent ? (
+            <>
+              <Text style={styles.helpTitle}>Need immediate help?</Text>
+              <Text style={styles.helpSub}>
+                Pressing this button will silently alert all SafeGuard users within 500 meters.
+                Your identity stays completely anonymous.
+              </Text>
+              <View style={styles.helpBtnContainer}>
+                <Animated.View style={{ transform: [{ scale: helpPulse }] }}>
+                  <TouchableOpacity
+                    style={styles.helpBtn}
+                    onPress={handleHelpMe}
+                    disabled={isLoadingHelp}
+                    activeOpacity={0.85}
+                  >
+                    <LinearGradient colors={['#FF1744', '#D50000']} style={styles.helpBtnGrad}>
+                      <Text style={styles.helpBtnEmoji}>🆘</Text>
+                      <Text style={styles.helpBtnText}>
+                        {isLoadingHelp ? 'Alerting...' : 'HELP ME'}
+                      </Text>
+                      <Text style={styles.helpBtnSub}>Anonymous · Instant</Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </Animated.View>
+              </View>
+              <View style={styles.helpInfoRow}>
+                <View style={styles.helpInfoCard}><Text style={styles.helpInfoEmoji}>🔒</Text><Text style={styles.helpInfoText}>100% Anonymous</Text></View>
+                <View style={styles.helpInfoCard}><Text style={styles.helpInfoEmoji}>📡</Text><Text style={styles.helpInfoText}>500m radius alert</Text></View>
+                <View style={styles.helpInfoCard}><Text style={styles.helpInfoEmoji}>⚡</Text><Text style={styles.helpInfoText}>Instant notify</Text></View>
+              </View>
+            </>
+          ) : (
+            <View style={styles.helpSentContainer}>
+              <Text style={styles.helpSentEmoji}>✅</Text>
+              <Text style={styles.helpSentTitle}>Alert Sent!</Text>
+              <Text style={styles.helpSentCount}>
+                <Text style={{ color: colors.primary, fontSize: 40, fontWeight: '900' }}>{helpCount}</Text>
+                {'\n'}nearby SafeGuard users alerted
+              </Text>
+              <Text style={styles.helpSentNote}>
+                Help should arrive within minutes.{'\n'}Stay visible and keep your phone accessible.
+              </Text>
+              <TouchableOpacity style={styles.helpResetBtn} onPress={() => { setHelpSent(false); setHelpCount(0); }}>
+                <Text style={styles.helpResetText}>I'm Safe Now ✅</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  header: { paddingTop: 56, paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
+  headerTitle: { fontSize: 24, fontWeight: '800', color: colors.text },
+  tabBar: {
+    flexDirection: 'row',
+    paddingHorizontal: spacing.lg,
+    gap: spacing.xs,
+    marginBottom: spacing.sm,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  tabActive: { backgroundColor: colors.primary, borderColor: colors.border },
+  tabText: { color: colors.textSecondary, fontSize: 11, fontWeight: '600', textAlign: 'center' },
+  tabTextActive: { color: colors.textLight },
+  tabContent: { paddingHorizontal: spacing.lg, paddingTop: spacing.xs },
+  // Map
+  mapPlaceholder: {
+    height: 220,
+    borderRadius: borderRadius.lg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  mapPlaceholderText: { fontSize: 48, marginBottom: spacing.xs },
+  mapPlaceholderLabel: { color: colors.text, fontSize: 18, fontWeight: '700' },
+  mapPlaceholderSub: { color: colors.textSecondary, fontSize: 11, textAlign: 'center', paddingHorizontal: spacing.lg, marginTop: 4 },
+  markerLegend: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.md },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendText: { color: colors.textSecondary, fontSize: 11 },
+  sectionTitle: { ...typography.h4, marginBottom: spacing.sm },
+  reportCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 4,
+    justifyContent: 'space-between',
+  },
+  reportLeft: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 },
+  reportDot: { width: 12, height: 12, borderRadius: 6 },
+  reportLabel: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  reportTime: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
+  voteRow: { flexDirection: 'row', gap: spacing.xs },
+  voteBtn: { padding: spacing.xs },
+  voteText: { fontSize: 16 },
+  reportAddBtn: {
+    backgroundColor: colors.primary,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    marginTop: spacing.sm,
+  },
+  reportAddText: { color: colors.textLight, fontSize: 15, fontWeight: '700' },
+  // Self defense
+  langRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
+  langBtn: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  langBtnActive: { backgroundColor: colors.secondary, borderColor: colors.border },
+  langText: { color: colors.textSecondary, fontSize: 13, fontWeight: '600' },
+  langTextActive: { color: colors.textLight },
+  tipCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 4,
+  },
+  tipHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  tipIconCircle: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  tipEmoji: { fontSize: 24 },
+  tipTitle: { fontSize: 16, fontWeight: '700' },
+  tipSub: { color: colors.textSecondary, fontSize: 11 },
+  tipArrow: { color: colors.textSecondary, fontSize: 14 },
+  tipSteps: { marginTop: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border },
+  stepRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginBottom: spacing.sm },
+  stepNum: { width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
+  stepNumText: { color: colors.text, fontSize: 11, fontWeight: '800' },
+  stepText: { flex: 1, color: colors.text, fontSize: 13, lineHeight: 20 },
+  // Help Me tab
+  helpCenterContent: { flex: 1, paddingHorizontal: spacing.lg, paddingTop: spacing.xl, alignItems: 'center' },
+  helpTitle: { fontSize: 22, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: spacing.sm },
+  helpSub: { color: colors.textSecondary, fontSize: 14, textAlign: 'center', lineHeight: 22, marginBottom: spacing.xl },
+  helpBtnContainer: { marginBottom: spacing.xl },
+  helpBtn: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    overflow: 'hidden',
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 30,
+    elevation: 15,
+  },
+  helpBtnGrad: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  helpBtnEmoji: { fontSize: 36, marginBottom: 4 },
+  helpBtnText: { color: colors.textLight, fontSize: 20, fontWeight: '900', letterSpacing: 2 },
+  helpBtnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 10, marginTop: 4 },
+  helpInfoRow: { flexDirection: 'row', gap: spacing.sm },
+  helpInfoCard: {
+    flex: 1,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  helpInfoEmoji: { fontSize: 22, marginBottom: 4 },
+  helpInfoText: { color: colors.textSecondary, fontSize: 11, textAlign: 'center' },
+  // Help sent state
+  helpSentContainer: { alignItems: 'center', paddingTop: spacing.xl },
+  helpSentEmoji: { fontSize: 64, marginBottom: spacing.md },
+  helpSentTitle: { fontSize: 28, fontWeight: '900', color: colors.success, marginBottom: spacing.md },
+  helpSentCount: { color: colors.text, fontSize: 18, textAlign: 'center', lineHeight: 50, marginBottom: spacing.md },
+  helpSentNote: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', lineHeight: 22, marginBottom: spacing.xl },
+  helpResetBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+  },
+  helpResetText: { color: colors.textLight, fontSize: 15, fontWeight: '700' },
+});
