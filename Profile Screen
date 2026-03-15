@@ -1,0 +1,528 @@
+// ============================================================
+// SafeGuard — ProfileScreen.tsx
+// User profile: photo, name, phone, trusted circle
+// Settings: shake SOS, voice SOS, fake PIN, real PIN,
+// auto-lock timer, logout, app version info
+// ============================================================
+
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Switch,
+  Alert,
+  TextInput,
+  Platform,
+} from 'react-native';
+
+import { LinearGradient } from 'expo-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { clearSession } from '../lib/auth';
+
+interface Contact {
+  id: string;
+  name: string;
+  phone: string;
+  emoji: string;
+}
+
+export default function ProfileScreen({ onLogout }: { onLogout?: () => void }) {
+  const navigation = useNavigation<any>();
+
+  // User info
+  const [userName, setUserName] = useState('Priya Sharma');
+  const [userPhone, setUserPhone] = useState('+91 98765 43210');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editNameVal, setEditNameVal] = useState('');
+
+  // Settings
+  const [shakeSOSEnabled, setShakeSOSEnabled] = useState(true);
+  const [voiceSOSEnabled, setVoiceSOSEnabled] = useState(false);
+  const [autoLockMinutes, setAutoLockMinutes] = useState(2);
+
+  // Trusted circle
+  const [trustedContacts, setTrustedContacts] = useState<Contact[]>([
+    { id: '1', name: 'Mom', phone: '+91 98765 43210', emoji: '👩' },
+    { id: '2', name: 'Dad', phone: '+91 87654 32109', emoji: '👨' },
+    { id: '3', name: 'Sis', phone: '+91 76543 21098', emoji: '👧' },
+  ]);
+
+  // Add contact form
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [newContactName, setNewContactName] = useState('');
+  const [newContactPhone, setNewContactPhone] = useState('');
+
+  useEffect(() => {
+    loadProfile();
+    loadSettings();
+  }, []);
+
+  const loadProfile = async () => {
+    const user = await AsyncStorage.getItem('safeguard_user');
+    if (user) {
+      const d = JSON.parse(user);
+      if (d.name) setUserName(d.name);
+      if (d.phone) setUserPhone(d.phone);
+    }
+    const contacts = await AsyncStorage.getItem('safeguard_trusted_contacts');
+    if (contacts) setTrustedContacts(JSON.parse(contacts));
+  };
+
+  const loadSettings = async () => {
+    const shake = await AsyncStorage.getItem('safeguard_shake_sos');
+    if (shake !== null) setShakeSOSEnabled(shake === 'true');
+    const voice = await AsyncStorage.getItem('safeguard_voice_sos');
+    if (voice !== null) setVoiceSOSEnabled(voice === 'true');
+    const lock = await AsyncStorage.getItem('safeguard_auto_lock');
+    if (lock !== null) setAutoLockMinutes(parseInt(lock));
+  };
+
+  const saveSettings = async (key: string, value: string) => {
+    await AsyncStorage.setItem(key, value);
+  };
+
+  const saveName = async () => {
+    if (!editNameVal.trim()) return;
+    setUserName(editNameVal);
+    const user = JSON.parse((await AsyncStorage.getItem('safeguard_user')) || '{}');
+    await AsyncStorage.setItem('safeguard_user', JSON.stringify({ ...user, name: editNameVal }));
+    setIsEditingName(false);
+  };
+
+  const addTrustedContact = async () => {
+    if (!newContactName.trim() || !newContactPhone.trim()) {
+      Alert.alert('Error', 'Enter name and phone number.');
+      return;
+    }
+    const emojis = ['👩', '👨', '👧', '🧑', '👩‍⚕️', '👮', '👩‍💻'];
+    const contact: Contact = {
+      id: Date.now().toString(),
+      name: newContactName,
+      phone: newContactPhone,
+      emoji: emojis[trustedContacts.length % emojis.length],
+    };
+    const updated = [...trustedContacts, contact];
+    setTrustedContacts(updated);
+    await AsyncStorage.setItem('safeguard_trusted_contacts', JSON.stringify(updated));
+    setNewContactName('');
+    setNewContactPhone('');
+    setShowAddContact(false);
+  };
+
+  const removeContact = async (id: string) => {
+    Alert.alert('Remove Contact', 'Remove from trusted circle?', [
+      { text: 'Cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          const updated = trustedContacts.filter(c => c.id !== id);
+          setTrustedContacts(updated);
+          await AsyncStorage.setItem('safeguard_trusted_contacts', JSON.stringify(updated));
+        },
+      },
+    ]);
+  };
+
+  const handleChangePin = () => {
+    Alert.alert('Change PIN', 'You will be taken to the PIN setup screen on next restart.');
+    AsyncStorage.removeItem('safeguard_pin');
+    AsyncStorage.removeItem('safeguard_fake_pin');
+  };
+
+  const handleLogout = () => {
+    const performLogout = async () => {
+      try {
+        // Clear both keys: session (used by App.tsx on startup) and user data
+        await clearSession();
+        await AsyncStorage.removeItem('safeguard_user');
+        // Call the callback — App.tsx sets isLoggedIn(false) which
+        // switches the navigator to the Login screen automatically
+        onLogout?.();
+      } catch (e) {
+        console.error('Logout failed:', e);
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      performLogout(); // Skip confirm on web for faster testing or use a modal
+    } else {
+      Alert.alert('Logout', 'Are you sure you want to logout?', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Logout', style: 'destructive', onPress: performLogout },
+      ]);
+    }
+  };
+
+
+  const autoLockOptions = [1, 2, 5, 10];
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        {/* ── Profile Header ─────────────────────────────────────────────── */}
+        <View style={styles.profileSection}>
+          <LinearGradient
+            colors={[colors.primary + '33', colors.secondary + '33']}
+            style={styles.profileBanner}
+          >
+            <View style={styles.avatarBig}>
+              <Text style={styles.avatarEmoji}>👩</Text>
+              <TouchableOpacity style={styles.avatarEditBtn}>
+                <Text style={styles.avatarEditText}>📷</Text>
+              </TouchableOpacity>
+            </View>
+            {isEditingName ? (
+              <View style={styles.nameEditRow}>
+                <TextInput
+                  style={styles.nameInput}
+                  value={editNameVal}
+                  onChangeText={setEditNameVal}
+                  autoFocus
+                  placeholder="Your name"
+                  placeholderTextColor={colors.textSecondary}
+                />
+                <TouchableOpacity style={styles.saveNameBtn} onPress={saveName}>
+                  <Text style={styles.saveNameText}>✓</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity onPress={() => { setIsEditingName(true); setEditNameVal(userName); }}>
+                <Text style={styles.profileName}>{userName} ✏️</Text>
+              </TouchableOpacity>
+            )}
+            <Text style={styles.profilePhone}>{userPhone}</Text>
+          </LinearGradient>
+        </View>
+
+        {/* ── Trusted Circle ─────────────────────────────────────────────── */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>👥 Trusted Circle</Text>
+          {trustedContacts.map(contact => (
+            <View key={contact.id} style={styles.contactRow}>
+              <View style={styles.contactAvatar}>
+                <Text style={styles.contactEmoji}>{contact.emoji}</Text>
+              </View>
+              <View style={styles.contactInfo}>
+                <Text style={styles.contactName}>{contact.name}</Text>
+                <Text style={styles.contactPhone}>{contact.phone}</Text>
+              </View>
+              <TouchableOpacity style={styles.removeBtn} onPress={() => removeContact(contact.id)}>
+                <Text style={styles.removeBtnText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+
+          {showAddContact ? (
+            <View style={styles.addContactForm}>
+              <TextInput
+                style={styles.formInput}
+                placeholder="Name"
+                placeholderTextColor={colors.textSecondary}
+                value={newContactName}
+                onChangeText={setNewContactName}
+              />
+              <TextInput
+                style={styles.formInput}
+                placeholder="Phone number"
+                placeholderTextColor={colors.textSecondary}
+                value={newContactPhone}
+                onChangeText={setNewContactPhone}
+                keyboardType="phone-pad"
+              />
+              <View style={styles.formBtns}>
+                <TouchableOpacity style={styles.cancelFormBtn} onPress={() => setShowAddContact(false)}>
+                  <Text style={styles.cancelFormText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.saveFormBtn} onPress={addTrustedContact}>
+                  <Text style={styles.saveFormText}>Add ✓</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.addContactBtn} onPress={() => setShowAddContact(true)}>
+              <Text style={styles.addContactText}>+ Add Trusted Contact</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* ── Settings ─────────────────────────────────────────────────────── */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>⚙️ Settings</Text>
+
+          {/* Shake SOS */}
+          <View style={styles.settingRow}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>📳 Shake to SOS</Text>
+              <Text style={styles.settingDesc}>Shake 3x to trigger silent SOS</Text>
+            </View>
+            <Switch
+              value={shakeSOSEnabled}
+              onValueChange={(v) => { setShakeSOSEnabled(v); saveSettings('safeguard_shake_sos', v.toString()); }}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              thumbColor={colors.text}
+            />
+          </View>
+
+          {/* Voice SOS */}
+          <View style={styles.settingRow}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>🎙️ Voice SOS Keyword</Text>
+              <Text style={styles.settingDesc}>Say "HELP" 3x to trigger SOS</Text>
+            </View>
+            <Switch
+              value={voiceSOSEnabled}
+              onValueChange={(v) => { setVoiceSOSEnabled(v); saveSettings('safeguard_voice_sos', v.toString()); }}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              thumbColor={colors.text}
+            />
+          </View>
+
+          {/* Auto-lock timer */}
+          <View style={styles.settingBlock}>
+            <Text style={styles.settingLabel}>🔒 Auto-lock Timer</Text>
+            <View style={styles.lockTimerRow}>
+              {autoLockOptions.map(min => (
+                <TouchableOpacity
+                  key={min}
+                  style={[styles.lockTimerBtn, autoLockMinutes === min && styles.lockTimerBtnActive]}
+                  onPress={() => { setAutoLockMinutes(min); saveSettings('safeguard_auto_lock', min.toString()); }}
+                >
+                  <Text style={[styles.lockTimerText, autoLockMinutes === min && styles.lockTimerTextActive]}>
+                    {min}m
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Change PIN */}
+          <TouchableOpacity style={styles.settingBtn} onPress={handleChangePin}>
+            <Text style={styles.settingBtnEmoji}>🔢</Text>
+            <Text style={styles.settingBtnText}>Change PIN & Fake PIN</Text>
+            <Text style={styles.settingBtnArrow}>›</Text>
+          </TouchableOpacity>
+
+          {/* Fake PIN info */}
+          <View style={styles.fakePinInfo}>
+            <Text style={styles.fakePinTitle}>🕵️ Fake PIN (Decoy Mode)</Text>
+            <Text style={styles.fakePinDesc}>
+              Entering your fake PIN shows a dummy screen to anyone forcing you to unlock the app. Your real data stays protected.
+            </Text>
+          </View>
+        </View>
+
+        {/* ── About ───────────────────────────────────────────────────────── */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>ℹ️ About SafeGuard</Text>
+          <View style={styles.aboutRow}><Text style={styles.aboutLabel}>Version</Text><Text style={styles.aboutValue}>1.0.0</Text></View>
+          <View style={styles.aboutRow}><Text style={styles.aboutLabel}>Build</Text><Text style={styles.aboutValue}>Expo SDK 51</Text></View>
+          <View style={styles.aboutRow}><Text style={styles.aboutLabel}>Developer</Text><Text style={styles.aboutValue}>SafeGuard Team</Text></View>
+          <Text style={styles.mission}>
+            🛡️ SafeGuard's mission is to empower every woman with digital safety tools. Stay safe, stay strong.
+          </Text>
+        </View>
+
+        {/* ── Logout ──────────────────────────────────────────────────────── */}
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+          <Text style={styles.logoutText}>🚪 Logout</Text>
+        </TouchableOpacity>
+
+        <View style={{ height: 100 }} />
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scrollContent: { paddingTop: 56 },
+  profileSection: { marginHorizontal: spacing.lg, marginBottom: spacing.md },
+  profileBanner: {
+    borderRadius: borderRadius.lg,
+    padding: spacing.xl,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  avatarBig: { position: 'relative', marginBottom: spacing.md },
+  avatarEmoji: { fontSize: 70 },
+  avatarEditBtn: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarEditText: { fontSize: 12 },
+  nameEditRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: 4 },
+  nameInput: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '700',
+    borderWidth: 1,
+    borderColor: colors.secondary,
+    textAlign: 'center',
+  },
+  saveNameBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.sm,
+    padding: spacing.xs,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveNameText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  profileName: { color: colors.text, fontSize: 22, fontWeight: '800', marginBottom: 4 },
+  profilePhone: { color: colors.textSecondary, fontSize: 14 },
+  // Cards
+  card: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.md,
+  },
+  cardTitle: { ...typography.h4, marginBottom: spacing.md },
+  // Trusted contacts
+  contactRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
+  contactAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+  },
+  contactEmoji: { fontSize: 22 },
+  contactInfo: { flex: 1 },
+  contactName: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  contactPhone: { color: colors.textSecondary, fontSize: 12 },
+  removeBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  removeBtnText: { color: colors.textSecondary, fontSize: 14 },
+  addContactBtn: {
+    marginTop: spacing.xs,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.secondary,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+  },
+  addContactText: { color: colors.secondary, fontSize: 13, fontWeight: '600' },
+  addContactForm: { marginTop: spacing.sm },
+  formInput: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    color: colors.text,
+    marginBottom: spacing.xs,
+    fontSize: 14,
+  },
+  formBtns: { flexDirection: 'row', gap: spacing.sm, marginTop: 4 },
+  cancelFormBtn: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  cancelFormText: { color: colors.textSecondary, fontSize: 13 },
+  saveFormBtn: {
+    flex: 2,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.sm,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+  },
+  saveFormText: { color: colors.textLight, fontSize: 13, fontWeight: '700' },
+  // Settings
+  settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
+  settingBlock: { paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
+  settingInfo: { flex: 1, marginRight: spacing.sm },
+  settingLabel: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  settingDesc: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
+  lockTimerRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  lockTimerBtn: {
+    flex: 1,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.sm,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  lockTimerBtnActive: { backgroundColor: colors.secondary, borderColor: colors.border },
+  lockTimerText: { color: colors.textSecondary, fontSize: 13, fontWeight: '600' },
+  lockTimerTextActive: { color: colors.textLight },
+  settingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  settingBtnEmoji: { fontSize: 20, marginRight: spacing.sm },
+  settingBtnText: { flex: 1, color: colors.text, fontSize: 14, fontWeight: '600' },
+  settingBtnArrow: { color: colors.textSecondary, fontSize: 18 },
+  fakePinInfo: {
+    marginTop: spacing.sm,
+    backgroundColor: colors.secondary + '15',
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.secondary + '44',
+  },
+  fakePinTitle: { color: colors.secondary, fontSize: 13, fontWeight: '700', marginBottom: 4 },
+  fakePinDesc: { color: colors.textSecondary, fontSize: 12, lineHeight: 18 },
+  // About
+  aboutRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: spacing.xs, borderBottomWidth: 1, borderBottomColor: colors.border },
+  aboutLabel: { color: colors.textSecondary, fontSize: 13 },
+  aboutValue: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  mission: { color: colors.textSecondary, fontSize: 12, lineHeight: 20, marginTop: spacing.md, fontStyle: 'italic' },
+  // Logout
+  logoutBtn: {
+    marginHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  logoutText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+});
