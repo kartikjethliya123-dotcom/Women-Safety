@@ -1,0 +1,616 @@
+// SafeGuard — LiveLocationScreen.tsx
+// Real-time GPS sharing with zone monitoring, auto-alerts,
+// Google Maps integration, and risk zone overlays
+// ============================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Animated,
+  Share,
+  Alert,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
+import { NavigationProp } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { getGoogleMapsLink, reverseGeocodeCoords } from '../services/location';
+import { RootStackParamList } from '../../App';
+import MapView, { Marker, Circle } from '../components/MapShim';
+import {
+  detectUserZone,
+  getAllZones,
+  ZoneDetectionResult,
+  RiskZone,
+} from '../services/riskZoneService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { sendZoneAlertSMS } from '../services/sms';
+import { supabase } from '../lib/supabase';
+
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;
+}
+
+interface Watcher {
+  name: string;
+  emoji: string;
+  since: string;
+}
+
+export default function LiveLocationScreen({ navigation }: Props) {
+  const [isSharing, setIsSharing] = useState(false);
+  const [location, setLocation] = useState<Location.LocationObject | null>(null);
+  const [sharingSeconds, setSharingSeconds] = useState(0);
+  const [mapsLink, setMapsLink] = useState('');
+  const [accuracy, setAccuracy] = useState<number>(0);
+  const [address, setAddress] = useState('');
+
+  // ── Zone Detection State ────────────────────────────────────────────────
+  const [zoneResult, setZoneResult] = useState<ZoneDetectionResult | null>(null);
+  const [nearbyZones, setNearbyZones] = useState<RiskZone[]>([]);
+  const [lastZoneRisk, setLastZoneRisk] = useState<string>('SAFE');
+  const lastAlertedRef = useRef<string | null>(null);
+
+  const locationSub = useRef<Location.LocationSubscription | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dotAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  // Demo watchers
+  const [watchers] = useState<Watcher[]>([
+    { name: 'Mom', emoji: '👩', since: '3 min ago' },
+    { name: 'Dad', emoji: '👨', since: '8 min ago' },
+    { name: 'Sis', emoji: '👧', since: '1 min ago' },
+  ]);
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+    loadNearbyZones();
+    return () => stopTracking();
+  }, []);
+
+  const loadNearbyZones = async () => {
+    try {
+      const zones = await getAllZones();
+      setNearbyZones(zones);
+    } catch {}
+  };
+
+  const startPulse = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotAnim, { toValue: 0.3, duration: 500, useNativeDriver: true }),
+        Animated.timing(dotAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+      ])
+    ).start();
+  };
+
+  // ── Auto-Alert on Zone Change ────────────────────────────────────────────
+  const handleZoneChange = async (result: ZoneDetectionResult, lat: number, lng: number) => {
+    if (result.combinedRisk === 'HIGH' && lastZoneRisk !== 'HIGH') {
+      // Alert user
+      Alert.alert(
+        '🚨 Danger Zone Alert',
+        `You have entered a high-risk area: ${result.nearestZone?.name || 'Unknown'}.\n\n${result.description}\n\nYour trusted contacts are being notified.`,
+        [{ text: 'I Understand', style: 'cancel' }],
+      );
+
+      // Auto-send alert to contacts
+      const zoneId = result.nearestZone?.id || 'unknown';
+      if (lastAlertedRef.current !== zoneId) {
+        lastAlertedRef.current = zoneId;
+        try {
+          const stored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+          if (stored) {
+            const rawContacts = JSON.parse(stored);
+            const contacts = rawContacts
+              .filter((c: any) => c.isCustom === true)
+              .map((c: any) => ({
+                id: c.id, name: c.name,
+                phone: c.phone || c.number || '',
+                relation: c.description || c.relation || 'Contact',
+              }))
+              .filter((c: any) => c.phone);
+
+            if (contacts.length > 0) {
+              const userStore = await AsyncStorage.getItem('safeguard_user');
+              const userName = userStore ? JSON.parse(userStore).name || 'User' : 'User';
+              await sendZoneAlertSMS(contacts, userName, result.nearestZone?.name || 'High-Risk Area', { latitude: lat, longitude: lng });
+            }
+          }
+        } catch (e) {
+          console.warn('[LiveLocation] Zone alert failed:', e);
+        }
+      }
+    }
+
+    setLastZoneRisk(result.combinedRisk);
+    setZoneResult(result);
+  };
+
+  const startTracking = async () => {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Location permission is required to share your live location.');
+      return;
+    }
+
+    setIsSharing(true);
+    setSharingSeconds(0);
+    startPulse();
+
+    // Get initial location
+    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+    setLocation(loc);
+    setAccuracy(Math.round(loc.coords.accuracy ?? 0));
+    const link = getGoogleMapsLink(loc.coords.latitude, loc.coords.longitude);
+    setMapsLink(link);
+
+    // Reverse geocode
+    const addr = await reverseGeocodeCoords(loc.coords.latitude, loc.coords.longitude);
+    setAddress(addr);
+
+    // Initial zone check
+    const zone = await detectUserZone(loc.coords.latitude, loc.coords.longitude);
+    setZoneResult(zone);
+
+    // Watch position every 5 seconds
+    locationSub.current = await Location.watchPositionAsync(
+      {
+        accuracy: Location.Accuracy.High,
+        timeInterval: 5000,
+        distanceInterval: 5,
+      },
+      async (newLoc) => {
+        setLocation(newLoc);
+        setAccuracy(Math.round(newLoc.coords.accuracy ?? 0));
+        const link = getGoogleMapsLink(newLoc.coords.latitude, newLoc.coords.longitude);
+        setMapsLink(link);
+
+        // --- Supabase Sync ---
+        try {
+          await supabase.from('live_locations').upsert({
+            latitude: newLoc.coords.latitude,
+            longitude: newLoc.coords.longitude,
+            is_tracking: true,
+            last_seen: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[Supabase Sync] Failed:', e);
+        }
+        // ---------------------
+
+        // Zone detection on every update
+        const zoneCheck = await detectUserZone(newLoc.coords.latitude, newLoc.coords.longitude);
+        await handleZoneChange(zoneCheck, newLoc.coords.latitude, newLoc.coords.longitude);
+
+        // Update address periodically
+        if (Math.random() < 0.15) {
+          const addr = await reverseGeocodeCoords(newLoc.coords.latitude, newLoc.coords.longitude);
+          setAddress(addr);
+        }
+      }
+    );
+
+    // Timer counter
+    timerRef.current = setInterval(() => {
+      setSharingSeconds(prev => prev + 1);
+    }, 1000);
+  };
+
+  const stopTracking = () => {
+    locationSub.current?.remove();
+    if (timerRef.current) clearInterval(timerRef.current);
+    dotAnim.stopAnimation();
+    setIsSharing(false);
+    setSharingSeconds(0);
+    lastAlertedRef.current = null;
+  };
+
+  const handleShare = async () => {
+    if (!mapsLink) return;
+    await Share.share({
+      message: `📍 My live location: ${mapsLink}\n📍 ${address}\n\nSent via SafeGuard Safety App 🛡️`,
+      title: 'My Live Location',
+    });
+  };
+
+  const formatDuration = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${s}s`;
+  };
+
+  const formatCoord = (n: number) => n.toFixed(6);
+
+  // ── Zone banner style ────────────────────────────────────────────────────
+  const getZoneBanner = () => {
+    if (!zoneResult) return null;
+    switch (zoneResult.combinedRisk) {
+      case 'HIGH':
+        return { bg: 'rgba(255,45,85,0.12)', border: '#FF2D55', color: '#FF2D55', text: '🚨 HIGH RISK ZONE', icon: '🔴' };
+      case 'MEDIUM':
+        return { bg: 'rgba(255,133,27,0.12)', border: '#FF851B', color: '#FF851B', text: '⚠️ MEDIUM RISK', icon: '🟡' };
+      default:
+        return { bg: 'rgba(34,197,94,0.1)', border: '#22C55E', color: '#22C55E', text: '✅ SAFE AREA', icon: '🟢' };
+    }
+  };
+
+  // ── Zone circle color ────────────────────────────────────────────────────
+  const getZoneCircleColor = (risk: string) => {
+    switch (risk) {
+      case 'HIGH': return { stroke: '#FF2D55', fill: 'rgba(255,45,85,0.15)' };
+      case 'MEDIUM': return { stroke: '#FF851B', fill: 'rgba(255,133,27,0.10)' };
+      default: return { stroke: '#22C55E', fill: 'rgba(34,197,94,0.08)' };
+    }
+  };
+
+  return (
+    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+      <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>📍 Live Location</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        {/* ── Zone Status Banner ──────────────────────────────────────────── */}
+        {isSharing && zoneResult && (() => {
+          const z = getZoneBanner();
+          if (!z) return null;
+          return (
+            <View style={[styles.zoneBanner, { backgroundColor: z.bg, borderColor: z.border }]}>
+              <Text style={[styles.zoneBannerTitle, { color: z.color }]}>{z.text}</Text>
+              <Text style={styles.zoneBannerDesc}>{zoneResult.description}</Text>
+              {zoneResult.nearestZone && (
+                <Text style={styles.zoneBannerDist}>
+                  📏 Nearest zone: {zoneResult.distanceToZone}m away
+                </Text>
+              )}
+            </View>
+          );
+        })()}
+
+        {/* Status card */}
+        <View style={[styles.statusCard, { borderColor: isSharing ? colors.accent : colors.border }]}>
+          <View style={styles.statusRow}>
+            <Animated.View style={[styles.statusDot, { backgroundColor: isSharing ? colors.accent : colors.textSecondary, opacity: dotAnim }]} />
+            <Text style={[styles.statusText, { color: isSharing ? colors.accent : colors.textSecondary }]}>
+              {isSharing ? 'LIVE SHARING' : 'NOT SHARING'}
+            </Text>
+          </View>
+          {isSharing && (
+            <Text style={styles.liveSince}>
+              Live since: {formatDuration(sharingSeconds)}
+            </Text>
+          )}
+        </View>
+
+        {/* Location display */}
+        {location && (
+          <View style={styles.coordCard}>
+            <Text style={styles.coordLabel}>Current Position</Text>
+            {address ? (
+              <Text style={styles.addressText}>📍 {address}</Text>
+            ) : null}
+            <View style={styles.coordRow}>
+              <View style={styles.coordItem}>
+                <Text style={styles.coordItemLabel}>Latitude</Text>
+                <Text style={styles.coordValue}>{formatCoord(location.coords.latitude)}</Text>
+              </View>
+              <View style={styles.coordDivider} />
+              <View style={styles.coordItem}>
+                <Text style={styles.coordItemLabel}>Longitude</Text>
+                <Text style={styles.coordValue}>{formatCoord(location.coords.longitude)}</Text>
+              </View>
+            </View>
+            <Text style={styles.accuracyText}>
+              🎯 Accuracy: ±{accuracy}m · Updated every 5 seconds
+            </Text>
+          </View>
+        )}
+
+        {/* ── Map with Zone Overlays ──────────────────────────────────────── */}
+        <View style={styles.mapBlock}>
+          {location ? (
+            <MapView
+              style={StyleSheet.absoluteFillObject}
+              region={{
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                latitudeDelta: 0.008,
+                longitudeDelta: 0.008,
+              }}
+              showsUserLocation={true}
+              followsUserLocation={true}
+              showsMyLocationButton={false}
+            >
+              {/* User marker */}
+              <Marker
+                coordinate={{
+                  latitude: location.coords.latitude,
+                  longitude: location.coords.longitude,
+                }}
+                title="You are here"
+                description={address || `±${accuracy}m accuracy`}
+              />
+
+              {/* Risk Zone Circles */}
+              {nearbyZones.map(zone => {
+                const c = getZoneCircleColor(zone.riskLevel);
+                return (
+                  <Circle
+                    key={`zone-${zone.id}`}
+                    center={{ latitude: zone.latitude, longitude: zone.longitude }}
+                    radius={zone.radiusMeters}
+                    strokeColor={c.stroke}
+                    fillColor={c.fill}
+                    strokeWidth={1.5}
+                  />
+                );
+              })}
+
+              {/* Zone markers */}
+              {nearbyZones.filter(z => z.riskLevel === 'HIGH').map(zone => (
+                <Marker
+                  key={`zone-marker-${zone.id}`}
+                  coordinate={{ latitude: zone.latitude, longitude: zone.longitude }}
+                  title={zone.name}
+                  description={zone.description}
+                  pinColor="#FF2D55"
+                />
+              ))}
+            </MapView>
+          ) : (
+            <>
+              <Text style={styles.mapEmoji}>🗺️</Text>
+              <Text style={styles.mapLabel}>Location will appear here</Text>
+            </>
+          )}
+
+          {isSharing && (
+            <View style={styles.mapLiveBadge}>
+              <Animated.View style={[styles.mapLiveDot, { opacity: dotAnim }]} />
+              <Text style={styles.mapLiveText}>LIVE</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Toggle button */}
+        <TouchableOpacity
+          style={[styles.toggleBtn, { marginBottom: spacing.md }]}
+          onPress={isSharing ? stopTracking : startTracking}
+          activeOpacity={0.8}
+        >
+          <LinearGradient
+            colors={isSharing ? ['#415B58', '#2A3C3A'] : [colors.primary, colors.accent]}
+            style={styles.toggleGrad}
+          >
+            <Text style={styles.toggleText}>
+              {isSharing ? '⏹ Stop Sharing' : '▶ Start Sharing'}
+            </Text>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        {/* Share link */}
+        {isSharing && mapsLink && (
+          <TouchableOpacity style={styles.shareBtn} onPress={handleShare}>
+            <Text style={styles.shareBtnText}>🔗 Share Google Maps Link</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Watchers */}
+        <Text style={styles.sectionTitle}>👁️ Watching Your Location</Text>
+        {isSharing ? (
+          watchers.map((w, i) => (
+            <View key={i} style={styles.watcherCard}>
+              <View style={styles.watcherAvatar}>
+                <Text style={styles.watcherEmoji}>{w.emoji}</Text>
+              </View>
+              <View style={styles.watcherInfo}>
+                <Text style={styles.watcherName}>{w.name}</Text>
+                <Text style={styles.watcherSince}>Watching since {w.since}</Text>
+              </View>
+              <View style={styles.watcherOnlineDot} />
+            </View>
+          ))
+        ) : (
+          <View style={styles.noWatchersCard}>
+            <Text style={styles.noWatchersText}>
+              Start sharing to let your trusted circle see your location
+            </Text>
+          </View>
+        )}
+
+        {/* Info */}
+        <View style={styles.infoCard}>
+          <Text style={styles.infoTitle}>ℹ️ How it works</Text>
+          <Text style={styles.infoText}>
+            • GPS is captured every 5 seconds{'\n'}
+            • AI detects if you enter a danger zone{'\n'}
+            • Auto-alerts trusted contacts on HIGH risk{'\n'}
+            • Risk zone circles shown on map{'\n'}
+            • Trusted contacts get a shareable link{'\n'}
+            • Battery-optimized using expo-location{'\n'}
+            • Auto-stops when you press "Stop Sharing"
+          </Text>
+        </View>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    </Animated.View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scrollContent: { paddingTop: 50, paddingBottom: 40 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  backBtn: { padding: spacing.sm },
+  backText: { color: colors.textSecondary, fontSize: 14 },
+  headerTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+
+  // ── Zone Banner ────────────────────────────────────────────────────────────
+  zoneBanner: {
+    marginHorizontal: spacing.lg,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    alignItems: 'center',
+  },
+  zoneBannerTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  zoneBannerDesc: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  zoneBannerDist: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    marginTop: 4,
+  },
+
+  statusCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    alignItems: 'center',
+  },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  statusDot: { width: 12, height: 12, borderRadius: 6 },
+  statusText: { fontSize: 16, fontWeight: '800', letterSpacing: 2 },
+  liveSince: { color: colors.textSecondary, fontSize: 12, marginTop: 4 },
+  coordCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.md,
+  },
+  coordLabel: { color: colors.textSecondary, fontSize: 12, marginBottom: spacing.sm },
+  addressText: { color: colors.text, fontSize: 13, fontWeight: '600', marginBottom: spacing.sm },
+  coordRow: { flexDirection: 'row', alignItems: 'center' },
+  coordItem: { flex: 1, alignItems: 'center' },
+  coordItemLabel: { color: colors.textSecondary, fontSize: 11 },
+  coordValue: { color: colors.accent, fontSize: 15, fontWeight: '700', marginTop: 2 },
+  coordDivider: { width: 1, height: 30, backgroundColor: colors.border },
+  accuracyText: { color: colors.textSecondary, fontSize: 11, marginTop: spacing.sm, textAlign: 'center' },
+  mapBlock: {
+    marginHorizontal: spacing.lg,
+    height: 220,
+    borderRadius: borderRadius.lg,
+    overflow: 'hidden',
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mapEmoji: { fontSize: 40, marginBottom: spacing.xs },
+  mapLabel: { color: colors.textSecondary, fontSize: 12, textAlign: 'center', paddingHorizontal: spacing.md },
+  mapLiveBadge: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,212,255,0.15)',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    gap: 5,
+  },
+  mapLiveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: colors.accent },
+  mapLiveText: { color: colors.accent, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  toggleBtn: { marginHorizontal: spacing.lg, borderRadius: borderRadius.md, overflow: 'hidden' },
+  toggleGrad: { paddingVertical: spacing.md, alignItems: 'center' },
+  toggleText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  shareBtn: {
+    marginHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  shareBtnText: { color: colors.textLight, fontSize: 15, fontWeight: '600' },
+  sectionTitle: { ...typography.h4, paddingHorizontal: spacing.lg, marginBottom: spacing.sm },
+  watcherCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  watcherAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.md,
+  },
+  watcherEmoji: { fontSize: 22 },
+  watcherInfo: { flex: 1 },
+  watcherName: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  watcherSince: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
+  watcherOnlineDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.success },
+  noWatchersCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  noWatchersText: { color: colors.textSecondary, fontSize: 13, textAlign: 'center' },
+  infoCard: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  infoTitle: { color: colors.accent, fontSize: 14, fontWeight: '700', marginBottom: spacing.sm },
+  infoText: { color: colors.textSecondary, fontSize: 13, lineHeight: 22 },
+});
