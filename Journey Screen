@@ -1,0 +1,473 @@
+// ============================================================
+// SafeGuard — JourneyScreen.tsx
+// Journey tracking: enter destination + ETA, monitor
+// GPS deviations (201m) and unexpected stops (3 min),
+// auto-alert contacts if not arrived by ETA
+// ============================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  TextInput,
+  ScrollView,
+  Alert,
+  Animated,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
+import { NavigationProp } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { getGoogleMapsLink } from '../services/location';
+import { RootStackParamList } from '../../App';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { sendJourneyAlert } from '../services/sms';
+
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;}
+
+type JourneyState = 'setup' | 'active' | 'safe';
+
+export default function JourneyScreen({ navigation }: Props) {
+  const [journeyState, setJourneyState] = useState<JourneyState>('setup');
+  const [destination, setDestination] = useState('');
+  const [etaMinutes, setEtaMinutes] = useState('30');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [distanceTraveled, setDistanceTraveled] = useState(0);
+  const [currentLocation, setCurrentLocation] = useState<Location.LocationObject | null>(null);
+  const [startLocation, setStartLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [stoppedSeconds, setStoppedSeconds] = useState(0);
+  const [lastMoveTime, setLastMoveTime] = useState(0);
+  const [alerts, setAlerts] = useState<string[]>([]);
+  const [mapsLink, setMapsLink] = useState('');
+
+  const locationSub = useRef<Location.LocationSubscription | null>(null);
+  const elapsedTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevLocation = useRef<{ lat: number; lng: number } | null>(null);
+  const stateRef = useRef<JourneyState>('setup');
+  const contactsRef = useRef<any[]>([]);
+
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const pulseDot = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    loadContacts();
+    return () => cleanup();
+  }, []);
+
+  const loadContacts = async () => {
+    // 2. Load contacts and Send SMS
+    const stored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+    if (stored) contactsRef.current = JSON.parse(stored);
+  };
+
+  const cleanup = () => {
+    locationSub.current?.remove();
+    if (elapsedTimer.current) clearInterval(elapsedTimer.current);
+    if (stopCheckRef.current) clearInterval(stopCheckRef.current);
+  };
+
+  const startJourney = async () => {
+    if (!destination.trim()) {
+      Alert.alert('Missing Info', 'Please enter a destination.');
+      return;
+    }
+
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Location access is required for journey tracking.');
+      return;
+    }
+
+    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+    setCurrentLocation(loc);
+    setStartLocation({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+    prevLocation.current = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+    setLastMoveTime(Date.now());
+    const link = getGoogleMapsLink(loc.coords.latitude, loc.coords.longitude);
+    setMapsLink(link);
+
+    setJourneyState('active');
+    stateRef.current = 'active';
+    setElapsedSeconds(0);
+    setStoppedSeconds(0);
+    setAlerts([]);
+
+    // Start pulse animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseDot, { toValue: 1.4, duration: 600, useNativeDriver: true }),
+        Animated.timing(pulseDot, { toValue: 2, duration: 600, useNativeDriver: true }),
+      ])
+    ).start();
+
+    // Elapsed timer
+    elapsedTimer.current = setInterval(() => {
+      setElapsedSeconds(prev => {
+        const next = prev + 1;
+        const etaSecs = parseInt(etaMinutes) * 60;
+        
+        // Progress animation logic
+        const progress = Math.min(next / (etaSecs || 1), 1);
+        progressAnim.setValue(progress);
+
+        // ETA overdue check (using stateRef for fresh value)
+        if (next === etaSecs && stateRef.current === 'active') {
+          handleTriggerAlert('not_arrived', '⏰ ETA overdue! Auto-alerting trusted contacts...');
+        }
+        return next;
+      });
+    }, 1000);
+
+    // Watch position
+    locationSub.current = await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.High, timeInterval: 5000, distanceInterval: 10 },
+      (newLoc) => {
+        setCurrentLocation(newLoc);
+        const { latitude, longitude } = newLoc.coords;
+        const link = getGoogleMapsLink(latitude, longitude);
+        setMapsLink(link);
+
+        if (prevLocation.current) {
+          const dist = calcDistance(
+            prevLocation.current.lat, prevLocation.current.lng,
+            latitude, longitude
+          );
+          setDistanceTraveled(prev => prev + dist);
+
+          // Stopped check
+          if (dist < 6) {
+            setStoppedSeconds(prev => {
+              const next = prev + 6;
+              if (next >= 180) { // 3 minutes
+                handleTriggerAlert('stopped', '⚠️ You appear to have stopped for 3+ minutes. Alerting contacts...');
+              }
+              return next;
+            });
+          } else {
+            setStoppedSeconds(0);
+            setLastMoveTime(Date.now());
+          }
+        }
+        prevLocation.current = { lat: latitude, lng: longitude };
+      }
+    );
+  };
+
+  const addAlert = (msg: string) => {
+    setAlerts(prev => {
+      if (prev.includes(msg)) return prev;
+      return [...prev, msg];
+    });
+  };
+
+  const handleTriggerAlert = async (type: 'stopped' | 'deviated' | 'not_arrived', msg: string) => {
+    addAlert(msg);
+    if (currentLocation && contactsRef.current.length > 0) {
+      const user = await AsyncStorage.getItem('safeguard_user');
+      const name = user ? JSON.parse(user).name || 'User' : 'User';
+      sendJourneyAlert(
+        contactsRef.current,
+        name,
+        type,
+        { latitude: currentLocation.coords.latitude, longitude: currentLocation.coords.longitude }
+      );
+    }
+  };
+
+  const calcDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371e3;
+    const φ1 = (lat1 * Math.PI) / 180;
+    const φ2 = (lat2 * Math.PI) / 180;
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  const endJourney = () => {
+    cleanup();
+    setJourneyState('safe');
+    stateRef.current = 'safe';
+    progressAnim.stopAnimation();
+    pulseDot.stopAnimation();
+  };
+
+  const resetJourney = () => {
+    setJourneyState('setup');
+    stateRef.current = 'setup';
+    setDestination('');
+    setEtaMinutes('30');
+    setElapsedSeconds(0);
+    setDistanceTraveled(0);
+    setAlerts([]);
+    progressAnim.setValue(0);
+  };
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${s}s`;
+  };
+
+  const etaSecondsTotal = parseInt(etaMinutes) * 60;
+  const remainingSecs = Math.max(etaSecondsTotal - elapsedSeconds, 0);
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>🚶 Journey Tracker</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        {/* ── Setup ─────────────────────────────────────────────────────── */}
+        {journeyState === 'setup' && (
+          <View style={styles.setupCard}>
+            <Text style={styles.setupTitle}>Plan Your Journey</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Destination (e.g., Connaught Place)"
+              placeholderTextColor={colors.textSecondary}
+              value={destination}
+              onChangeText={setDestination}
+            />
+            <View style={styles.etaRow}>
+              <Text style={styles.etaLabel}>Expected arrival time:</Text>
+              <View style={styles.etaInputBg}>
+                <TextInput
+                  style={styles.etaInput}
+                  value={etaMinutes}
+                  onChangeText={setEtaMinutes}
+                  keyboardType="number-pad"
+                  maxLength={4}
+                />
+                <Text style={styles.etaUnit}>minutes</Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.startBtn} onPress={startJourney}>
+              <LinearGradient colors={[colors.primary, colors.accent]} style={styles.startGrad}>
+                <Text style={styles.startText}>▶ Start Journey</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+            <View style={styles.infoCard}>
+              <Text style={styles.infoTitle}>📋 Auto-Alert Triggers</Text>
+              {[
+                '⏸️ Stopped for 4+ minutes unexpectedly',
+                '📍 Deviated 201m+ from route',
+                '⏰ Not arrived by expected ETA',
+              ].map((t, i) => <Text key={i} style={styles.infoItem}>{t}</Text>)}
+            </View>
+          </View>
+        )}
+
+        {/* ── Active Journey ────────────────────────────────────────────── */}
+        {journeyState === 'active' && (
+          <>
+            <View style={styles.activeCard}>
+              <View style={styles.activeHeader}>
+                <View style={styles.liveRow}>
+                  <Animated.View style={[styles.liveDot, { opacity: pulseDot }]} />
+                  <Text style={styles.liveText}>TRACKING</Text>
+                </View>
+                <Text style={styles.destinationLabel}>→ {destination}</Text>
+              </View>
+
+              {/* ETA Progress */}
+              <Text style={styles.statLabel}>ETA Progress</Text>
+              <View style={styles.progressBg}>
+                <Animated.View
+                  style={[
+                    styles.progressFill,
+                    { width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) },
+                  ]}
+                />
+              </View>
+              <Text style={styles.etaCountdown}>
+                {remainingSecs > 0 ? `${formatTime(remainingSecs)} remaining` : '⏰ ETA Passed'}
+              </Text>
+
+              {/* Stats */}
+              <View style={styles.statsRow}>
+                <View style={styles.statBox}>
+                  <Text style={styles.statValue}>{formatTime(elapsedSeconds)}</Text>
+                  <Text style={styles.statBoxLabel}>Elapsed</Text>
+                </View>
+                <View style={styles.statBox}>
+                  <Text style={styles.statValue}>{(distanceTraveled / 1000).toFixed(2)} km</Text>
+                  <Text style={styles.statBoxLabel}>Distance</Text>
+                </View>
+                <View style={styles.statBox}>
+                  <Text style={[styles.statValue, stoppedSeconds > 90 && { color: colors.warning }]}>
+                    {formatTime(stoppedSeconds)}
+                  </Text>
+                  <Text style={styles.statBoxLabel}>Stopped</Text>
+                </View>
+              </View>
+
+              {/* Location */}
+              {currentLocation && (
+                <Text style={styles.coordText}>
+                  📍 {currentLocation.coords.latitude.toFixed(5)}, {currentLocation.coords.longitude.toFixed(5)}
+                </Text>
+              )}
+            </View>
+
+            {/* Alerts */}
+            {alerts.length > 0 && (
+              <View style={styles.alertsCard}>
+                <Text style={styles.alertsTitle}>⚠️ Automatic Alerts Sent</Text>
+                {alerts.map((a, i) => (
+                  <Text key={i} style={styles.alertItem}>{a}</Text>
+                ))}
+              </View>
+            )}
+
+            {/* Safe button */}
+            <TouchableOpacity style={styles.safeBtn} onPress={endJourney}>
+              <LinearGradient colors={[colors.primary, colors.accent]} style={styles.startGrad}>
+                <Text style={styles.startText}>✅ I'm Safe — End Journey</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {/* ── Safe State ─────────────────────────────────────────────────── */}
+        {journeyState === 'safe' && (
+          <View style={styles.safeCard}>
+            <Text style={styles.safeEmoji}>✅</Text>
+            <Text style={styles.safeTitle}>Journey Complete!</Text>
+            <Text style={styles.safeSub}>
+              You arrived safely at {destination}.{'\n'}
+              Trusted contacts have been notified.
+            </Text>
+            <View style={styles.safeSummary}>
+              <Text style={styles.safeStat}>🕐 Duration: {formatTime(elapsedSeconds)}</Text>
+              <Text style={styles.safeStat}>📏 Distance: {(distanceTraveled / 1000).toFixed(2)} km</Text>
+              <Text style={styles.safeStat}>⚠️ Alerts sent: {alerts.length}</Text>
+            </View>
+            <TouchableOpacity style={styles.newJourneyBtn} onPress={resetJourney}>
+              <Text style={styles.newJourneyText}>New Journey</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <View style={{ height: 60 }} />
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scrollContent: { paddingTop: 50 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  backBtn: { padding: spacing.sm },
+  backText: { color: colors.textSecondary, fontSize: 14 },
+  headerTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  setupCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  setupTitle: { ...typography.h4, marginBottom: spacing.md },
+  input: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    color: colors.text,
+    fontSize: 14,
+    marginBottom: spacing.md,
+  },
+  etaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.lg },
+  etaLabel: { color: colors.textSecondary, fontSize: 14 },
+  etaInputBg: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.background, borderRadius: borderRadius.sm, borderWidth: 1, borderColor: colors.border, paddingHorizontal: spacing.md },
+  etaInput: { color: colors.text, fontSize: 18, fontWeight: '700', paddingVertical: spacing.xs, width: 50, textAlign: 'center' },
+  etaUnit: { color: colors.textSecondary, fontSize: 14 },
+  startBtn: { borderRadius: borderRadius.md, overflow: 'hidden', marginBottom: spacing.md },
+  startGrad: { paddingVertical: spacing.md, alignItems: 'center' },
+  startText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  infoCard: { backgroundColor: colors.background, borderRadius: borderRadius.md, padding: spacing.md },
+  infoTitle: { color: colors.warning, fontSize: 14, fontWeight: '700', marginBottom: spacing.xs },
+  infoItem: { color: colors.textSecondary, fontSize: 13, marginBottom: 3 },
+  // Active journey
+  activeCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.success + '44',
+    marginBottom: spacing.md,
+  },
+  activeHeader: { marginBottom: spacing.md },
+  liveRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: 5 },
+  liveDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.success },
+  liveText: { color: colors.success, fontSize: 14, fontWeight: '800', letterSpacing: 2 },
+  destinationLabel: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  statLabel: { color: colors.textSecondary, fontSize: 13, marginBottom: 6 },
+  progressBg: { height: 8, backgroundColor: colors.background, borderRadius: borderRadius.full, overflow: 'hidden', marginBottom: spacing.xs },
+  progressFill: { height: '100%', backgroundColor: colors.success, borderRadius: borderRadius.full },
+  etaCountdown: { color: colors.textSecondary, fontSize: 13, marginBottom: spacing.md },
+  statsRow: { flexDirection: 'row', gap: spacing.sm },
+  statBox: { flex: 1, backgroundColor: colors.background, borderRadius: borderRadius.sm, padding: spacing.sm, alignItems: 'center' },
+  statValue: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  statBoxLabel: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
+  coordText: { color: colors.textSecondary, fontSize: 12, marginTop: spacing.sm },
+  alertsCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.warning + '16',
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    marginBottom: spacing.md,
+  },
+  alertsTitle: { color: colors.warning, fontSize: 14, fontWeight: '700', marginBottom: spacing.xs },
+  alertItem: { color: colors.text, fontSize: 13, marginBottom: 4 },
+  safeBtn: { marginHorizontal: spacing.lg, borderRadius: borderRadius.md, overflow: 'hidden' },
+  // Safe state
+  safeCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.xl,
+    borderWidth: 1,
+    borderColor: colors.success,
+    alignItems: 'center',
+  },
+  safeEmoji: { fontSize: 64, marginBottom: spacing.md },
+  safeTitle: { fontSize: 28, fontWeight: '800', color: colors.success, marginBottom: spacing.sm },
+  safeSub: { color: colors.textSecondary, fontSize: 14, textAlign: 'center', lineHeight: 22, marginBottom: spacing.md },
+  safeSummary: { backgroundColor: colors.background, borderRadius: borderRadius.md, padding: spacing.md, width: '100%', marginBottom: spacing.lg },
+  safeStat: { color: colors.text, fontSize: 14, marginBottom: 4 },
+  newJourneyBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+  },
+  newJourneyText: { color: colors.textLight, fontWeight: '700', fontSize: 14 },
+});
