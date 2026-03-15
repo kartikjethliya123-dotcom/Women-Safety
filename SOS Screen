@@ -1,0 +1,936 @@
+====================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Animated,
+  Vibration,
+  Alert,
+  Linking,
+  ScrollView,
+  Platform,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
+import { NavigationProp } from '@react-navigation/native';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { getGoogleMapsLink, reverseGeocodeCoords } from '../services/location';
+import { sendSOSSMS } from '../services/sms';
+import { RootStackParamList } from '../../App';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import MapView, { Marker } from '../components/MapShim';
+import { supabase } from '../lib/supabase';
+import {
+  getSOSRateLimitStatus,
+  recordSOSPress,
+  formatBlockDuration,
+  SOSRateLimitStatus,
+} from '../services/sosRateLimit';
+import {
+  detectUserZone,
+  ZoneDetectionResult,
+} from '../services/riskZoneService';
+
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;}
+
+type SOSState = 'idle' | 'countdown' | 'sent';
+
+export default function SOSScreen({ navigation }: Props) {
+  const [sosState, setSOSState] = useState<SOSState>('idle');
+  const [countdown, setCountdown] = useState(3);
+  const [statusMsg, setStatusMsg] = useState('');
+
+  // ── Real-time tracking state after SOS ────────────────────────────────────
+  const [liveLocation, setLiveLocation] = useState<Location.LocationObject | null>(null);
+  const [liveAddress, setLiveAddress] = useState('');
+  const [liveMapsLink, setLiveMapsLink] = useState('');
+  const [liveTrackingSecs, setLiveTrackingSecs] = useState(0);
+  const [zoneResult, setZoneResult] = useState<ZoneDetectionResult | null>(null);
+
+  const liveSubRef = useRef<Location.LocationSubscription | null>(null);
+  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Rate-limit state ────────────────────────────────────────────────────────
+  const [rateLimitStatus, setRateLimitStatus] = useState<SOSRateLimitStatus | null>(null);
+  const [blockSecondsLeft, setBlockSecondsLeft] = useState(0);
+  const blockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Animations ─────────────────────────────────────────────────────────────
+  const pulse1 = useRef(new Animated.Value(1)).current;
+  const pulse2 = useRef(new Animated.Value(1)).current;
+  const pulse3 = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.8)).current;
+
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    startEntranceAnimation();
+    startIdlePulse();
+    loadRateLimitStatus();
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      if (blockTimerRef.current) clearInterval(blockTimerRef.current);
+      stopLiveTracking();
+    };
+  }, []);
+
+  // ── Load & live-countdown block status ──────────────────────────────────────
+  const loadRateLimitStatus = async () => {
+    const status = await getSOSRateLimitStatus();
+    setRateLimitStatus(status);
+    if (status.blocked) {
+      setBlockSecondsLeft(status.blockedSecondsRemaining);
+      startBlockCountdown(status.blockedSecondsRemaining);
+    }
+  };
+
+  const startBlockCountdown = (initialSeconds: number) => {
+    if (blockTimerRef.current) clearInterval(blockTimerRef.current);
+    let secs = initialSeconds;
+    blockTimerRef.current = setInterval(() => {
+      secs -= 1;
+      setBlockSecondsLeft(secs);
+      if (secs <= 0) {
+        clearInterval(blockTimerRef.current!);
+        loadRateLimitStatus();
+      }
+    }, 1000);
+  };
+
+  const startEntranceAnimation = () => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: 1, tension: 100, friction: 8, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const startIdlePulse = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse1, { toValue: 1.25, duration: 1000, useNativeDriver: true }),
+        Animated.timing(pulse1, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      ])
+    ).start();
+    setTimeout(() => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulse2, { toValue: 1.5, duration: 1200, useNativeDriver: true }),
+          Animated.timing(pulse2, { toValue: 1, duration: 1200, useNativeDriver: true }),
+        ])
+      ).start();
+    }, 400);
+    setTimeout(() => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulse3, { toValue: 1.75, duration: 1400, useNativeDriver: true }),
+          Animated.timing(pulse3, { toValue: 1, duration: 1400, useNativeDriver: true }),
+        ])
+      ).start();
+    }, 800);
+  };
+
+  // ── SOS Trigger ────────────────────────────────────────────────────────────
+  const handleSOSPress = async () => {
+    if (sosState !== 'idle') return;
+
+    // Check rate limit before triggering
+    const result = await recordSOSPress();
+    if (!result.allowed) {
+      setBlockSecondsLeft(result.blockedSecondsRemaining);
+      startBlockCountdown(result.blockedSecondsRemaining);
+      setRateLimitStatus({
+        blocked: true,
+        blockedSecondsRemaining: result.blockedSecondsRemaining,
+        pressesInWindow: 3,
+        maxPresses: 3,
+      });
+      Vibration.vibrate([0, 100, 80, 100, 80, 100]);
+      Alert.alert(
+        '🚫 SOS Temporarily Blocked',
+        `You have pressed SOS too many times in the last hour. For safety, your SOS is blocked for ${formatBlockDuration(result.blockedSecondsRemaining)}.\n\nIf this is a real emergency, please call 112 directly.`,
+        [{ text: 'Call 112 Now', onPress: () => Linking.openURL('tel:112'), style: 'destructive' }, { text: 'OK' }],
+      );
+      return;
+    }
+
+    // Refresh status count in UI
+    loadRateLimitStatus();
+
+    setSOSState('countdown');
+    setCountdown(3);
+    Vibration.vibrate([0, 100, 100, 100]);
+
+    countdownRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(countdownRef.current!);
+          triggerSOS();
+          return 0;
+        }
+        Vibration.vibrate(100);
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const cancelSOS = () => {
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    setSOSState('idle');
+    setCountdown(3);
+    Vibration.cancel();
+  };
+
+  // ── Enhanced SOS Trigger ──────────────────────────────────────────────────
+  const triggerSOS = async () => {
+    setSOSState('sent');
+    Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
+
+    const steps: string[] = [];
+
+    try {
+      // 1. Get high-accuracy location
+      setStatusMsg('📍 Getting your location...');
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      let locationObj: Location.LocationObject | null = null;
+      let mapsLink = 'https://maps.google.com';
+      let address = '';
+
+      if (status === 'granted') {
+        locationObj = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        mapsLink = getGoogleMapsLink(locationObj.coords.latitude, locationObj.coords.longitude);
+        setLiveLocation(locationObj);
+        setLiveMapsLink(mapsLink);
+
+        // 2. Reverse geocode for readable address
+        address = await reverseGeocodeCoords(locationObj.coords.latitude, locationObj.coords.longitude);
+        setLiveAddress(address);
+        steps.push('✅ GPS location captured');
+        steps.push(`📍 ${address}`);
+
+        // 3. Detect risk zone
+        const zone = await detectUserZone(locationObj.coords.latitude, locationObj.coords.longitude);
+        setZoneResult(zone);
+        if (zone.combinedRisk === 'HIGH') {
+          steps.push(`🚨 HIGH RISK ZONE: ${zone.nearestZone?.name || 'Unknown'}`);
+        } else if (zone.combinedRisk === 'MEDIUM') {
+          steps.push(`⚠️ Medium risk area detected`);
+        }
+      } else {
+        steps.push('⚠️ Location permission denied');
+      }
+
+      // 4. Load contacts and send SMS
+      setStatusMsg('📡 Notifying contacts...');
+      const stored = await AsyncStorage.getItem('safeguard_trusted_contacts');
+      const rawContacts = stored ? JSON.parse(stored) : [];
+      const contacts = rawContacts
+        .filter((c: any) => c.isCustom === true)
+        .map((c: any) => ({
+          id: c.id,
+          name: c.name,
+          phone: c.phone || c.number || '',
+          relation: c.description || c.relation || 'Contact',
+        }))
+        .filter((c: any) => c.phone);
+      const user = await AsyncStorage.getItem('safeguard_user');
+      const userName = user ? JSON.parse(user).name || 'User' : 'User';
+
+      if (contacts.length > 0 && locationObj) {
+        await sendSOSSMS(
+          contacts,
+          { latitude: locationObj.coords.latitude, longitude: locationObj.coords.longitude },
+          userName,
+          address,
+        );
+        steps.push(`✅ SOS alert sent to ${contacts.length} trusted contacts`);
+      } else {
+        steps.push('⚠️ No trusted contacts found to alert');
+      }
+
+      steps.push(`🗺️ ${mapsLink}`);
+
+      // 5. Log SOS alert to Supabase
+      setStatusMsg('📡 Logging SOS alert...');
+      try {
+        if (locationObj) {
+          await supabase.from('sos_alerts').insert({
+            lat: locationObj.coords.latitude,
+            lng: locationObj.coords.longitude,
+            message: `SOS triggered by ${userName} at ${address}`,
+            contact_name: contacts.length > 0 ? contacts[0].name : 'Unknown',
+            contact_phone: contacts.length > 0 ? contacts[0].phone : 'Unknown',
+            alert_type: 'emergency',
+            status: 'active',
+          });
+          steps.push('✅ SOS alert logged to cloud');
+        } else {
+          steps.push('⚠️ Failed to capture location for cloud log');
+        }
+      } catch (e) {
+        console.warn('[Supabase SOS] Failed to log:', e);
+      }
+
+      // 6. Start continuous live tracking
+      startLiveTracking();
+      steps.push('📡 Live location tracking started');
+
+      // 6. Call emergency
+      setStatusMsg('🚨 Calling emergency...');
+      steps.push('📞 Dialing 112...');
+      setTimeout(() => Linking.openURL('tel:112'), 2500);
+
+    } catch (err) {
+      steps.push('⚠️ Some steps failed — stay calm');
+    }
+
+    setStatusMsg(steps.join('\n'));
+  };
+
+  // ── Live Tracking After SOS ──────────────────────────────────────────────
+  const startLiveTracking = async () => {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') return;
+
+    setLiveTrackingSecs(0);
+
+    // Timer for tracking duration
+    liveTimerRef.current = setInterval(() => {
+      setLiveTrackingSecs(prev => prev + 1);
+    }, 1000);
+
+    // Watch position every 5 seconds
+    liveSubRef.current = await Location.watchPositionAsync(
+      {
+        accuracy: Location.Accuracy.High,
+        timeInterval: 5000,
+        distanceInterval: 5,
+      },
+      async (newLoc) => {
+        setLiveLocation(newLoc);
+        const link = getGoogleMapsLink(newLoc.coords.latitude, newLoc.coords.longitude);
+        setLiveMapsLink(link);
+
+        // Update address periodically (every ~30s to avoid API spam)
+        if (Math.random() < 0.17) {
+          const addr = await reverseGeocodeCoords(newLoc.coords.latitude, newLoc.coords.longitude);
+          setLiveAddress(addr);
+        }
+
+        // Check zone
+        const zone = await detectUserZone(newLoc.coords.latitude, newLoc.coords.longitude);
+        setZoneResult(zone);
+      },
+    );
+  };
+
+  const stopLiveTracking = () => {
+    liveSubRef.current?.remove();
+    liveSubRef.current = null;
+    if (liveTimerRef.current) {
+      clearInterval(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+  };
+
+  const formatDuration = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${s}s`;
+  };
+
+  // ── Zone status colors ────────────────────────────────────────────────────
+  const getZoneBannerStyle = () => {
+    if (!zoneResult) return null;
+    switch (zoneResult.combinedRisk) {
+      case 'HIGH':
+        return { bg: 'rgba(255,45,85,0.12)', border: colors.danger, color: colors.danger, text: '🚨 HIGH RISK ZONE' };
+      case 'MEDIUM':
+        return { bg: 'rgba(255,133,27,0.12)', border: colors.warning, color: colors.warning, text: '⚠️ MEDIUM RISK' };
+      default:
+        return { bg: 'rgba(34,197,94,0.1)', border: colors.success, color: colors.success, text: '✅ SAFE AREA' };
+    }
+  };
+
+  // ── Emergency numbers ──────────────────────────────────────────────────────
+  const emergencyNumbers = [
+    { number: '112', label: 'All Emergency', emoji: '🚨', color: colors.primary },
+    { number: '1091', label: 'Women Helpline', emoji: '👩', color: colors.secondary },
+    { number: '100', label: 'Police', emoji: '👮', color: colors.accent },
+    { number: '102', label: 'Ambulance', emoji: '🚑', color: colors.success },
+  ];
+
+  const callNumber = (n: string) => Linking.openURL(`tel:${n}`);
+
+  return (
+    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+      <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => { stopLiveTracking(); navigation.goBack(); }} style={styles.backBtn}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Emergency SOS</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        {/* ── Rate Limit Counter Badge ─────────────────────────────────────── */}
+        {rateLimitStatus && !rateLimitStatus.blocked && rateLimitStatus.pressesInWindow > 0 && (
+          <View style={styles.rateBadge}>
+            <Text style={styles.rateBadgeText}>
+              ⚠️  SOS used {rateLimitStatus.pressesInWindow}/{rateLimitStatus.maxPresses} times this hour
+            </Text>
+          </View>
+        )}
+
+        {/* ── BLOCKED STATE ─────────────────────────────────────────────────── */}
+        {rateLimitStatus?.blocked ? (
+          <View style={styles.blockedCard}>
+            <Text style={styles.blockedEmoji}>🚫</Text>
+            <Text style={styles.blockedTitle}>SOS Temporarily Blocked</Text>
+            <Text style={styles.blockedSubtitle}>
+              You pressed SOS more than 3 times in one hour.{`\n`}Your access is paused to prevent accidental alerts.
+            </Text>
+            <View style={styles.blockedTimerBox}>
+              <Text style={styles.blockedTimerLabel}>Unblocks in</Text>
+              <Text style={styles.blockedTimer}>{formatBlockDuration(blockSecondsLeft)}</Text>
+            </View>
+            <Text style={styles.blockedHint}>Is this a real emergency?</Text>
+            <TouchableOpacity
+              style={styles.callPoliceBtn}
+              onPress={() => Linking.openURL('tel:112')}
+            >
+              <LinearGradient colors={[colors.primary, colors.accent]} style={styles.callGradient}>
+                <Text style={styles.callText}>📞 CALL 112 — Emergency</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
+        ) : sosState !== 'sent' ? (
+          <>
+            {/* ── SOS Button ──────────────────────────────────────────────── */}
+            <View style={styles.sosCenterArea}>
+              {/* Pulse rings */}
+              <Animated.View style={[styles.ring, styles.ring3, { transform: [{ scale: pulse3 }] }]} />
+              <Animated.View style={[styles.ring, styles.ring2, { transform: [{ scale: pulse2 }] }]} />
+              <Animated.View style={[styles.ring, styles.ring1, { transform: [{ scale: pulse1 }] }]} />
+
+              {sosState === 'idle' ? (
+                <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
+                  <TouchableOpacity style={styles.sosBtn} onPress={handleSOSPress} activeOpacity={0.85}>
+                    <LinearGradient colors={['#FF1744', '#D50000']} style={styles.sosBtnGradient}>
+                      <Text style={styles.sosBtnEmoji}>🆘</Text>
+                      <Text style={styles.sosBtnText}>SOS</Text>
+                      <Text style={styles.sosBtnSub}>TAP TO ACTIVATE</Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </Animated.View>
+              ) : sosState === 'countdown' ? (
+                <View style={styles.sosBtn}>
+                  <LinearGradient colors={['#555D46', colors.sosButton, '#2A2E22']} style={styles.sosBtnGradient}>
+                    <Text style={styles.countdownNumber}>{countdown}</Text>
+                    <Text style={styles.countdownLabel}>SENDING SOS...</Text>
+                  </LinearGradient>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Countdown cancel */}
+            {sosState === 'countdown' && (
+              <TouchableOpacity style={styles.cancelBtn} onPress={cancelSOS}>
+                <Text style={styles.cancelText}>✕  CANCEL SOS</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Tips */}
+            {sosState === 'idle' && (
+              <View style={styles.tipsCard}>
+                <Text style={styles.tipsTitle}>📋 What happens when you press SOS:</Text>
+                {[
+                  '📍 Your GPS location is captured instantly',
+                  '🏠 Address is reverse-geocoded',
+                  '📱 SMS with live Maps link sent to trusted contacts',
+                  '🚨 AI detects if you are in a danger zone',
+                  '📡 Continuous live tracking starts',
+                  '📞 Emergency 112 is auto-dialed',
+                  '📳 Phone vibrates as confirmation',
+                ].map((tip, i) => (
+                  <Text key={i} style={styles.tipItem}>{tip}</Text>
+                ))}
+                <Text style={styles.volumeTip}>
+                  💡 Tip: Press volume button 3× quickly for Silent SOS (no countdown)
+                </Text>
+              </View>
+            )}
+          </>
+        ) : (
+          /* ── SOS Sent — Live Tracking Dashboard ──────────────────────── */
+          <View style={styles.sentCard}>
+            <Text style={styles.sentEmoji}>✅</Text>
+            <Text style={styles.sentTitle}>SOS SENT</Text>
+            <Text style={styles.sentSubtitle}>Help is on the way. Stay calm.</Text>
+
+            {/* Zone Status Banner */}
+            {zoneResult && (() => {
+              const z = getZoneBannerStyle();
+              if (!z) return null;
+              return (
+                <View style={[styles.zoneBanner, { backgroundColor: z.bg, borderColor: z.border }]}>
+                  <Text style={[styles.zoneBannerText, { color: z.color }]}>{z.text}</Text>
+                  <Text style={styles.zoneDesc}>{zoneResult.description}</Text>
+                </View>
+              );
+            })()}
+
+            {/* Live Tracking Info */}
+            <View style={styles.liveTrackingCard}>
+              <View style={styles.liveRow}>
+                <View style={styles.liveIndicator}>
+                  <View style={styles.livePulseDot} />
+                  <Text style={styles.liveLabel}>LIVE TRACKING</Text>
+                </View>
+                <Text style={styles.liveTimer}>{formatDuration(liveTrackingSecs)}</Text>
+              </View>
+
+              {liveAddress ? (
+                <Text style={styles.liveAddressText}>📍 {liveAddress}</Text>
+              ) : null}
+
+              {liveLocation && (
+                <Text style={styles.coordText}>
+                  🌐 {liveLocation.coords.latitude.toFixed(6)}, {liveLocation.coords.longitude.toFixed(6)}
+                  {liveLocation.coords.accuracy ? ` · ±${Math.round(liveLocation.coords.accuracy)}m` : ''}
+                </Text>
+              )}
+            </View>
+
+            {/* Mini Map */}
+            <View style={styles.miniMapContainer}>
+              {liveLocation ? (
+                <MapView
+                  style={StyleSheet.absoluteFillObject}
+                  region={{
+                    latitude: liveLocation.coords.latitude,
+                    longitude: liveLocation.coords.longitude,
+                    latitudeDelta: 0.005,
+                    longitudeDelta: 0.005,
+                  }}
+                  showsUserLocation={true}
+                  followsUserLocation={true}
+                  showsMyLocationButton={false}
+                >
+                  <Marker
+                    coordinate={{
+                      latitude: liveLocation.coords.latitude,
+                      longitude: liveLocation.coords.longitude,
+                    }}
+                    title="Your SOS Location"
+                    description={liveAddress || 'Tracking live...'}
+                  />
+                </MapView>
+              ) : (
+                <View style={styles.miniMapPlaceholder}>
+                  <Text style={{ fontSize: 32 }}>🗺️</Text>
+                  <Text style={styles.miniMapLabel}>Acquiring GPS...</Text>
+                </View>
+              )}
+              <View style={styles.miniMapLiveBadge}>
+                <View style={styles.miniMapLiveDot} />
+                <Text style={styles.miniMapLiveText}>LIVE</Text>
+              </View>
+            </View>
+
+            {/* Status Log */}
+            <ScrollView style={styles.statusLog}>
+              <Text style={styles.statusText}>{statusMsg}</Text>
+            </ScrollView>
+
+            {/* Call police button */}
+            <TouchableOpacity style={styles.callPoliceBtn} onPress={() => callNumber('112')}>
+              <LinearGradient colors={[colors.primary, colors.accent]} style={styles.callGradient}>
+                <Text style={styles.callText}>📞 CALL 112 — Police</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.doneBtn}
+              onPress={() => {
+                stopLiveTracking();
+                setSOSState('idle');
+                setStatusMsg('');
+                setLiveLocation(null);
+                setLiveAddress('');
+                setLiveMapsLink('');
+                setZoneResult(null);
+                setLiveTrackingSecs(0);
+              }}
+            >
+              <Text style={styles.doneBtnText}>✅ I'm Safe — Stop Tracking</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* ── Emergency Numbers ──────────────────────────────────────────── */}
+        <Text style={styles.sectionTitle}>Emergency Numbers</Text>
+        <View style={styles.numGrid}>
+          {emergencyNumbers.map(item => (
+            <TouchableOpacity
+              key={item.number}
+              style={[styles.numCard, { borderColor: item.color + '55' }]}
+              onPress={() => callNumber(item.number)}
+            >
+              <Text style={styles.numEmoji}>{item.emoji}</Text>
+              <Text style={[styles.numNumber, { color: item.color }]}>{item.number}</Text>
+              <Text style={styles.numLabel}>{item.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    </Animated.View>
+  );
+}
+
+const RING_SIZE = 170;
+const BTN_SIZE = 140;
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scrollContent: { paddingTop: 50, paddingBottom: 40 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.xl,
+  },
+  backBtn: { padding: spacing.sm },
+  backText: { color: colors.textSecondary, fontSize: 14 },
+  headerTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  // SOS center
+  sosCenterArea: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 280,
+    marginBottom: spacing.lg,
+  },
+  ring: {
+    position: 'absolute',
+    borderRadius: 9999,
+    borderWidth: 2,
+  },
+  ring1: {
+    width: RING_SIZE,
+    height: RING_SIZE,
+    borderColor: colors.primary + '55',
+  },
+  ring2: {
+    width: RING_SIZE + 40,
+    height: RING_SIZE + 40,
+    borderColor: colors.primary + '33',
+  },
+  ring3: {
+    width: RING_SIZE + 80,
+    height: RING_SIZE + 80,
+    borderColor: colors.primary + '18',
+  },
+  sosBtn: {
+    width: BTN_SIZE,
+    height: BTN_SIZE,
+    borderRadius: BTN_SIZE / 2,
+    overflow: 'hidden',
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 35,
+    elevation: 20,
+  },
+  sosBtnGradient: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sosBtnEmoji: { fontSize: 32 },
+  sosBtnText: { color: '#FFFFFF', fontSize: 28, fontWeight: '900', letterSpacing: 4 },
+  sosBtnSub: { color: 'rgba(255,255,255,0.6)', fontSize: 9, letterSpacing: 2, marginTop: 2 },
+  countdownNumber: { color: '#FFFFFF', fontSize: 64, fontWeight: '900', lineHeight: 70 },
+  countdownLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 10, letterSpacing: 2 },
+  cancelBtn: {
+    alignSelf: 'center',
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.primary,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.lg,
+  },
+  cancelText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  // Tips
+  tipsCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.lg,
+  },
+  tipsTitle: { color: colors.text, fontSize: 14, fontWeight: '700', marginBottom: spacing.sm },
+  tipItem: { color: colors.textSecondary, fontSize: 13, marginBottom: 4 },
+  volumeTip: {
+    color: colors.accent,
+    fontSize: 12,
+    marginTop: spacing.sm,
+    fontStyle: 'italic',
+  },
+  // Sent state
+  sentCard: {
+    marginHorizontal: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.success,
+    marginBottom: spacing.lg,
+  },
+  sentEmoji: { fontSize: 60, marginBottom: spacing.sm },
+  sentTitle: { fontSize: 28, fontWeight: '900', color: colors.success, letterSpacing: 4, marginBottom: 4 },
+  sentSubtitle: { color: colors.textSecondary, fontSize: 14, marginBottom: spacing.md },
+
+  // ── Zone Banner ────────────────────────────────────────────────────────────
+  zoneBanner: {
+    width: '100%',
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    alignItems: 'center',
+  },
+  zoneBannerText: {
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  zoneDesc: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+
+  // ── Live Tracking Card ─────────────────────────────────────────────────────
+  liveTrackingCard: {
+    width: '100%',
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  liveRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  liveIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  livePulseDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.success,
+  },
+  liveLabel: {
+    color: colors.success,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 2,
+  },
+  liveTimer: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  liveAddressText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  coordText: {
+    color: colors.textSecondary,
+    fontSize: 11,
+  },
+
+  // ── Mini Map ───────────────────────────────────────────────────────────────
+  miniMapContainer: {
+    width: '100%',
+    height: 180,
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  miniMapPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniMapLabel: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    marginTop: 4,
+  },
+  miniMapLiveBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,45,85,0.85)',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    gap: 5,
+  },
+  miniMapLiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#FFFFFF',
+  },
+  miniMapLiveText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+
+  statusLog: { maxHeight: 120, width: '100%', marginBottom: spacing.md },
+  statusText: { color: colors.text, fontSize: 13, lineHeight: 22 },
+  callPoliceBtn: {
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+    width: '100%',
+    marginBottom: spacing.sm,
+  },
+  callGradient: { paddingVertical: spacing.md, alignItems: 'center' },
+  callText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  doneBtn: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    borderRadius: borderRadius.md,
+    borderColor: colors.border,
+    backgroundColor: colors.secondary,
+  },
+  doneBtnText: { color: colors.textLight, fontSize: 14, fontWeight: '700' },
+  // Emergency numbers grid
+  sectionTitle: {
+    ...typography.h4,
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  numGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: spacing.lg,
+    gap: spacing.sm,
+  },
+  numCard: {
+    width: '47%',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  numEmoji: { fontSize: 28, marginBottom: 4 },
+  numNumber: { fontSize: 22, fontWeight: '900', marginBottom: 2 },
+  numLabel: { color: colors.textSecondary, fontSize: 11, textAlign: 'center' },
+  // ── Rate limit badge ─────────────────────────────────────────────────────────
+  rateBadge: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    backgroundColor: 'rgba(255,133,27,0.12)',
+    borderRadius: borderRadius.sm,
+    paddingVertical: 6,
+    paddingHorizontal: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.warning,
+  },
+  rateBadgeText: {
+    color: colors.warning,
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  // ── Blocked state card ────────────────────────────────────────────────────
+  blockedCard: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: colors.primary,
+  },
+  blockedEmoji: { fontSize: 64, marginBottom: spacing.sm },
+  blockedTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.primary,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+    letterSpacing: 1,
+  },
+  blockedSubtitle: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: spacing.md,
+  },
+  blockedTimerBox: {
+    backgroundColor: 'rgba(255,45,85,0.1)',
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.primary + '44',
+  },
+  blockedTimerLabel: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  blockedTimer: {
+    color: colors.primary,
+    fontSize: 42,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  blockedHint: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    marginBottom: spacing.sm,
+    fontStyle: 'italic',
+  },
+});
