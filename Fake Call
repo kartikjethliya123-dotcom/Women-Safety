@@ -1,0 +1,498 @@
+// ============================================================
+// SafeGuard — FakeCallScreen.tsx
+// Simulates an incoming call with configurable name/delay
+// Features: preset callers, timer options, ringtone (expo-av),
+// vibration, realistic call UI, shake-to-trigger
+// ============================================================
+
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Animated,
+  Vibration,
+  Alert,
+  Dimensions,
+  Platform,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { NavigationProp } from '@react-navigation/native';
+import { Accelerometer } from 'expo-sensors';
+import { Audio } from 'expo-av';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+
+import { RootStackParamList } from '../../App';
+
+interface Props {
+  navigation: NavigationProp<RootStackParamList>;
+  onLogin: () => void;
+}
+
+type CallState = 'setup' | 'ringing' | 'active';
+
+const PRESET_CALLERS = [
+  { name: 'Mom', emoji: '👩', subtitle: 'Mobile' },
+  { name: 'Dad', emoji: '👨', subtitle: 'Mobile' },
+  { name: 'Friend', emoji: '👯', subtitle: 'Mobile' },
+  { name: 'Police', emoji: '👮', subtitle: 'Emergency' },
+  { name: 'Boss', emoji: '💼', subtitle: 'Work' },
+  { name: 'Doctor', emoji: '👨‍⚕️', subtitle: 'Clinic' },
+];
+
+const TIMER_OPTIONS = [
+  { label: 'Now', seconds: 0 },
+  { label: '10s', seconds: 10 },
+  { label: '30s', seconds: 30 },
+  { label: '60s', seconds: 60 },
+];
+
+const { width, height } = Dimensions.get('window');
+
+export default function FakeCallScreen({ navigation }: Props) {
+  const [callState, setCallState] = useState<CallState>('setup');
+  const [selectedCaller, setSelectedCaller] = useState(PRESET_CALLERS[0]);
+  const [selectedTimer, setSelectedTimer] = useState(TIMER_OPTIONS[0]);
+  const [callDuration, setCallDuration] = useState(0);
+  const [countdown, setCountdown] = useState(0);
+
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringAnim = useRef(new Animated.Value(0)).current;
+  const avatarPulse = useRef(new Animated.Value(1)).current;
+  const slideAnswer = useRef(new Animated.Value(0)).current;
+  const accelSub = useRef<ReturnType<typeof Accelerometer.addListener> | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+
+  useEffect(() => {
+    setupShakeDetection();
+    return () => {
+      cleanup();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (callState === 'ringing') {
+      startRingAnimation();
+      startVibration();
+      playRingtone();
+    } else {
+      stopRingtone();
+      Vibration.cancel();
+    }
+  }, [callState]);
+
+
+  // ── Shake detection ──────────────────────────────────────────────────────
+  const setupShakeDetection = () => {
+    if (Platform.OS === 'web') {
+      console.log('Accelerometer not supported on web.');
+      return;
+    }
+    try {
+      Accelerometer.setUpdateInterval(300);
+      let lastMagnitude = 0;
+      accelSub.current = Accelerometer.addListener(({ x, y, z }) => {
+        const magnitude = Math.sqrt(x * x + y * y + z * z);
+        if (magnitude > 2.5 && lastMagnitude < 2.5) {
+          // Shake detected — start fake call in 5s
+          scheduleCall(5);
+        }
+        lastMagnitude = magnitude;
+      });
+    } catch (error) {
+      console.warn('Accelerometer setup failed:', error);
+    }
+  };
+
+
+  const scheduleCall = (seconds: number) => {
+    if (callState !== 'setup') return;
+    if (seconds === 0) {
+      triggerRinging();
+      return;
+    }
+    setCountdown(seconds);
+    countdownRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(countdownRef.current!);
+          triggerRinging();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const triggerRinging = () => {
+    setCallState('ringing');
+    setCountdown(0);
+  };
+
+  const startRingAnimation = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(ringAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
+        Animated.timing(ringAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
+      ])
+    ).start();
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(avatarPulse, { toValue: 1.1, duration: 600, useNativeDriver: true }),
+        Animated.timing(avatarPulse, { toValue: 1, duration: 600, useNativeDriver: true }),
+      ])
+    ).start();
+    // Answer slider
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(slideAnswer, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(slideAnswer, { toValue: 0, duration: 300, useNativeDriver: true }),
+      ])
+    ).start();
+  };
+
+  const startVibration = () => {
+    Vibration.vibrate([0, 1000, 500, 1000, 500, 1000], true);
+  };
+
+  const playRingtone = async () => {
+    try {
+      // Standard ringtone URL
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' }, // Placeholder ringtone
+        { shouldPlay: true, isLooping: true }
+      );
+      soundRef.current = sound;
+      await sound.playAsync();
+    } catch (error) {
+      console.log('Error playing ringtone:', error);
+    }
+  };
+
+  const stopRingtone = async () => {
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      } catch (error) {
+        console.log('Error stopping ringtone:', error);
+      }
+    }
+  };
+
+
+  const answerCall = () => {
+    ringAnim.stopAnimation();
+    avatarPulse.stopAnimation();
+    Vibration.cancel();
+    setCallState('active');
+    setCallDuration(0);
+    timerRef.current = setInterval(() => {
+      setCallDuration(prev => prev + 1);
+    }, 1000);
+  };
+
+  const rejectCall = () => {
+    Vibration.cancel();
+    ringAnim.stopAnimation();
+    avatarPulse.stopAnimation();
+    setCallState('setup');
+  };
+
+  const endCall = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setCallState('setup');
+    setCallDuration(0);
+  };
+
+  const cleanup = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    accelSub.current?.remove();
+    Vibration.cancel();
+    stopRingtone();
+  };
+
+
+  const formatDuration = (s: number) => {
+    const m = Math.floor(s / 60).toString().padStart(2, '0');
+    const sec = (s % 60).toString().padStart(2, '0');
+    return `${m}:${sec}`;
+  };
+
+  // ── Render: Setup screen ───────────────────────────────────────────────
+  if (callState === 'setup') {
+    return (
+      <View style={styles.container}>
+        <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>📞 Fake Call</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        <View style={styles.setupContent}>
+          {/* Caller selection */}
+          <Text style={styles.sectionLabel}>Choose Caller</Text>
+          <View style={styles.callerGrid}>
+            {PRESET_CALLERS.map(caller => (
+              <TouchableOpacity
+                key={caller.name}
+                style={[styles.callerCard, selectedCaller.name === caller.name && styles.callerCardActive]}
+                onPress={() => setSelectedCaller(caller)}
+              >
+                <Text style={styles.callerEmoji}>{caller.emoji}</Text>
+                <Text style={[styles.callerName, selectedCaller.name === caller.name && { color: colors.primary }]}>
+                  {caller.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Timer selection */}
+          <Text style={styles.sectionLabel}>Call Delay</Text>
+          <View style={styles.timerRow}>
+            {TIMER_OPTIONS.map(opt => (
+              <TouchableOpacity
+                key={opt.label}
+                style={[styles.timerCard, selectedTimer.label === opt.label && styles.timerCardActive]}
+                onPress={() => setSelectedTimer(opt)}
+              >
+                <Text style={[styles.timerLabel, selectedTimer.label === opt.label && styles.timerLabelActive]}>
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {countdown > 0 && (
+            <View style={styles.countdownBanner}>
+              <Text style={styles.countdownBannerText}>📞 Call in {countdown}s...</Text>
+            </View>
+          )}
+
+          {/* Trigger button */}
+          <TouchableOpacity
+            style={styles.triggerBtn}
+            onPress={() => scheduleCall(selectedTimer.seconds)}
+          >
+            <LinearGradient colors={[colors.primary, colors.accent]} style={styles.triggerGrad}>
+              <Text style={styles.triggerText}>
+                {selectedTimer.seconds === 0 ? '📞 Trigger Call Now' : `📞 Call in ${selectedTimer.label}`}
+              </Text>
+            </LinearGradient>
+          </TouchableOpacity>
+
+          {/* Shake tip */}
+          <View style={styles.shakeCard}>
+            <Text style={styles.shakeTitle}>📳 Shake to Trigger</Text>
+            <Text style={styles.shakeText}>
+              Shake your phone at any time to trigger a fake call in 5 seconds. Works discreetly without tapping anything.
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  // ── Render: Ringing screen ─────────────────────────────────────────────
+  if (callState === 'ringing') {
+    return (
+      <View style={styles.callScreen}>
+        <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+        <View style={styles.callHeader}>
+          <Text style={styles.callStatus}>Incoming Call...</Text>
+          <Text style={styles.callNetwork}>SafeGuard</Text>
+        </View>
+
+        <Animated.View style={[styles.callAvatar, { transform: [{ scale: avatarPulse }] }]}>
+          <LinearGradient colors={[colors.card, colors.background]} style={styles.callAvatarGrad}>
+            <Text style={styles.callAvatarEmoji}>{selectedCaller.emoji}</Text>
+          </LinearGradient>
+        </Animated.View>
+
+        <Text style={styles.callerDisplayName}>{selectedCaller.name}</Text>
+        <Text style={styles.callerSubtitle}>{selectedCaller.subtitle}</Text>
+
+        {/* Slide hint */}
+        <Animated.Text style={[styles.slideHint, { opacity: slideAnswer }]}>← Slide to Answer →</Animated.Text>
+
+        <View style={styles.callActions}>
+          {/* Reject */}
+          <TouchableOpacity style={[styles.callActionBtn, styles.rejectBtn]} onPress={rejectCall}>
+            <Text style={styles.callActionEmoji}>📵</Text>
+            <Text style={styles.callActionLabel}>Decline</Text>
+          </TouchableOpacity>
+          {/* Answer */}
+          <TouchableOpacity style={[styles.callActionBtn, styles.answerBtn]} onPress={answerCall}>
+            <Text style={styles.callActionEmoji}>📞</Text>
+            <Text style={styles.callActionLabel}>Answer</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // ── Render: Active call screen ─────────────────────────────────────────
+  return (
+    <View style={styles.callScreen}>
+      <LinearGradient colors={['#96BBBB', '#AACECE', '#96BBBB']} style={StyleSheet.absoluteFillObject} />
+
+      <View style={styles.callHeader}>
+        <Text style={styles.callStatus}>{formatDuration(callDuration)}</Text>
+        <Text style={styles.callNetwork}>SafeGuard</Text>
+      </View>
+
+      <View style={styles.callAvatar}>
+        <LinearGradient colors={[colors.success + '44', colors.card]} style={styles.callAvatarGrad}>
+          <Text style={styles.callAvatarEmoji}>{selectedCaller.emoji}</Text>
+        </LinearGradient>
+      </View>
+
+      <Text style={styles.callerDisplayName}>{selectedCaller.name}</Text>
+      <Text style={[styles.callerSubtitle, { color: colors.success }]}>On call...</Text>
+
+      {/* In-call buttons */}
+      <View style={styles.inCallGrid}>
+        {[
+          { emoji: '🔇', label: 'Mute' },
+          { emoji: '🔊', label: 'Speaker' },
+          { emoji: '⌨️', label: 'Keypad' },
+          { emoji: '📷', label: 'Video' },
+        ].map(btn => (
+          <TouchableOpacity key={btn.label} style={styles.inCallBtn}>
+            <Text style={styles.inCallBtnEmoji}>{btn.emoji}</Text>
+            <Text style={styles.inCallBtnLabel}>{btn.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* End call */}
+      <TouchableOpacity style={styles.endCallBtn} onPress={endCall}>
+        <View style={styles.endCallCircle}>
+          <Text style={styles.endCallEmoji}>📵</Text>
+        </View>
+        <Text style={styles.endCallLabel}>End Call</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 50,
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  backBtn: { padding: spacing.sm },
+  backText: { color: colors.textSecondary, fontSize: 14 },
+  headerTitle: { color: colors.text, fontSize: 20, fontWeight: '700' },
+  setupContent: { flex: 1, paddingHorizontal: spacing.lg },
+  sectionLabel: { color: colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: spacing.sm },
+  callerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg },
+  callerCard: {
+    width: (width - spacing.lg * 2 - spacing.sm * 2) / 3,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  callerCardActive: { borderColor: colors.primary, backgroundColor: colors.primary + '15' },
+  callerEmoji: { fontSize: 28, marginBottom: 4 },
+  callerName: { color: colors.textSecondary, fontSize: 12, fontWeight: '600' },
+  timerRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg },
+  timerCard: {
+    flex: 1,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  timerCardActive: { backgroundColor: colors.secondary, borderColor: colors.border },
+  timerLabel: { color: colors.textSecondary, fontSize: 14, fontWeight: '700' },
+  timerLabelActive: { color: colors.textLight },
+  countdownBanner: {
+    backgroundColor: colors.success + '22',
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.success,
+  },
+  countdownBannerText: { color: colors.success, fontSize: 16, fontWeight: '700' },
+  triggerBtn: { borderRadius: borderRadius.md, overflow: 'hidden', marginBottom: spacing.lg },
+  triggerGrad: { paddingVertical: spacing.md, alignItems: 'center' },
+  triggerText: { color: colors.textLight, fontSize: 16, fontWeight: '700' },
+  shakeCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  shakeTitle: { color: colors.accent, fontSize: 14, fontWeight: '700', marginBottom: 6 },
+  shakeText: { color: colors.textSecondary, fontSize: 13, lineHeight: 20 },
+  // Call screens
+  callScreen: { flex: 1, backgroundColor: colors.background, alignItems: 'center' },
+  callHeader: { marginTop: 60, alignItems: 'center', marginBottom: 30 },
+  callStatus: { color: colors.success, fontSize: 18, fontWeight: '600' },
+  callNetwork: { color: colors.textSecondary, fontSize: 12, marginTop: 4 },
+  callAvatar: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    overflow: 'hidden',
+    marginBottom: spacing.lg,
+    borderWidth: 3,
+    borderColor: colors.success,
+  },
+  callAvatarGrad: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  callAvatarEmoji: { fontSize: 70 },
+  callerDisplayName: { color: colors.text, fontSize: 32, fontWeight: '800', marginBottom: 4 },
+  callerSubtitle: { color: colors.textSecondary, fontSize: 16, marginBottom: spacing.xl },
+  slideHint: { color: colors.textSecondary, fontSize: 14, marginBottom: spacing.xl },
+  callActions: { flexDirection: 'row', gap: 60, marginTop: 'auto', marginBottom: 60 },
+  callActionBtn: { alignItems: 'center' },
+  rejectBtn: {},
+  answerBtn: {},
+  callActionEmoji: { fontSize: 32, marginBottom: 4 },
+  callActionLabel: { color: colors.textSecondary, fontSize: 12 },
+  inCallGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xl, marginTop: spacing.xl, marginBottom: 'auto' },
+  inCallBtn: { width: 70, alignItems: 'center' },
+  inCallBtnEmoji: { fontSize: 30, marginBottom: 4 },
+  inCallBtnLabel: { color: colors.textSecondary, fontSize: 12 },
+  endCallBtn: { alignItems: 'center', marginBottom: 60 },
+  endCallCircle: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 15,
+    elevation: 10,
+  },
+  endCallEmoji: { fontSize: 32 },
+  endCallLabel: { color: colors.text, fontSize: 12, fontWeight: '700' },
+});
