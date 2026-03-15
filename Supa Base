@@ -1,0 +1,141 @@
+/**
+ * SafeGuard Women Safety App — RLS POLICIES (JavaScript Version)
+ * 
+ * This file contains the SQL for the Row Level Security (RLS) policies.
+ * You can import this into a setup script or copy the SQL string below.
+ */
+
+export const RLS_POLICIES_SQL = `
+-- ============================================================
+-- SafeGuard Women Safety App — RLS POLICIES
+-- ============================================================
+
+-- BEFORE RUNNING: Drop old generic policies if they exist
+DROP POLICY IF EXISTS "Allow all on users"                   ON users;
+DROP POLICY IF EXISTS "Allow all on otps"                    ON otps;
+DROP POLICY IF EXISTS "Allow all on trusted_contacts"        ON trusted_contacts;
+DROP POLICY IF EXISTS "Allow all on sos_alerts"              ON sos_alerts;
+DROP POLICY IF EXISTS "Allow all on sos_notifications"       ON sos_notifications;
+DROP POLICY IF EXISTS "Allow all on live_locations"          ON live_locations;
+DROP POLICY IF EXISTS "Allow all on location_share_sessions" ON location_share_sessions;
+DROP POLICY IF EXISTS "Allow all on journeys"                ON journeys;
+DROP POLICY IF EXISTS "Allow all on journey_checkpoints"     ON journey_checkpoints;
+DROP POLICY IF EXISTS "Allow all on journey_watchers"        ON journey_watchers;
+DROP POLICY IF EXISTS "Allow all on safe_zones"              ON safe_zones;
+DROP POLICY IF EXISTS "Allow all on community_reports"       ON community_reports;
+DROP POLICY IF EXISTS "Allow all on report_votes"            ON report_votes;
+DROP POLICY IF EXISTS "Allow all on help_me_alerts"          ON help_me_alerts;
+DROP POLICY IF EXISTS "Allow all on fake_call_logs"          ON fake_call_logs;
+DROP POLICY IF EXISTS "Allow all on user_settings"           ON user_settings;
+DROP POLICY IF EXISTS "Allow all on notifications_log"       ON notifications_log;
+DROP POLICY IF EXISTS "Allow read on self_defense_tips"      ON self_defense_tips;
+DROP POLICY IF EXISTS "Allow read on self_defense_steps"     ON self_defense_steps;
+DROP POLICY IF EXISTS "Allow all on area_risk_scores"        ON area_risk_scores;
+
+-- 1. USERS TABLE
+CREATE POLICY "users_select_any" ON users FOR SELECT USING (true);
+CREATE POLICY "users_insert_signup" ON users FOR INSERT WITH CHECK (true);
+CREATE POLICY "users_update_own" ON users FOR UPDATE USING (auth.uid()::TEXT = id::TEXT) WITH CHECK (auth.uid()::TEXT = id::TEXT);
+CREATE POLICY "users_delete_own" ON users FOR DELETE USING (auth.uid()::TEXT = id::TEXT);
+
+-- 2. OTP TABLE
+CREATE POLICY "otps_insert_any" ON otps FOR INSERT WITH CHECK (true);
+CREATE POLICY "otps_select_verify" ON otps FOR SELECT USING (true);
+CREATE POLICY "otps_update_mark_used" ON otps FOR UPDATE USING (true) WITH CHECK (true);
+CREATE POLICY "otps_delete_expired" ON otps FOR DELETE USING (expires_at < CURRENT_TIMESTAMP OR used = TRUE);
+
+-- 3. USER SESSIONS TABLE
+CREATE POLICY "sessions_select_own" ON user_sessions FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "sessions_insert_own" ON user_sessions FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "sessions_update_own" ON user_sessions FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "sessions_delete_own" ON user_sessions FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 4. TRUSTED CONTACTS TABLE
+CREATE POLICY "contacts_select_own" ON trusted_contacts FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "contacts_insert_own" ON trusted_contacts FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "contacts_update_own" ON trusted_contacts FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "contacts_delete_own" ON trusted_contacts FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 5. SOS ALERTS TABLE
+CREATE POLICY "sos_select_own" ON sos_alerts FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "sos_insert_own" ON sos_alerts FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "sos_update_own_resolve" ON sos_alerts FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+
+-- 6. SOS NOTIFICATIONS TABLE
+CREATE POLICY "sos_notifications_select_own" ON sos_notifications FOR SELECT USING (sos_id IN (SELECT id FROM sos_alerts WHERE user_id::TEXT = auth.uid()::TEXT));
+CREATE POLICY "sos_notifications_insert_any" ON sos_notifications FOR INSERT WITH CHECK (true);
+
+-- 7. LIVE LOCATIONS TABLE
+CREATE POLICY "location_select_own" ON live_locations FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "location_select_shared" ON live_locations FOR SELECT USING (is_sharing = TRUE AND user_id IN (SELECT tc.user_id FROM trusted_contacts tc WHERE tc.phone_number IN (SELECT phone_number FROM users WHERE id::TEXT = auth.uid()::TEXT)));
+CREATE POLICY "location_insert_own" ON live_locations FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "location_update_own" ON live_locations FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+
+-- 8. LOCATION SHARE SESSIONS TABLE
+CREATE POLICY "share_session_select_own" ON location_share_sessions FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "share_session_insert_own" ON location_share_sessions FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "share_session_update_own" ON location_share_sessions FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "share_session_delete_own" ON location_share_sessions FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 9. JOURNEYS TABLE
+CREATE POLICY "journey_select_own" ON journeys FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "journey_insert_own" ON journeys FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "journey_update_own" ON journeys FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "journey_delete_own" ON journeys FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 10. JOURNEY CHECKPOINTS TABLE
+CREATE POLICY "checkpoint_select_own" ON journey_checkpoints FOR SELECT USING (journey_id IN (SELECT id FROM journeys WHERE user_id::TEXT = auth.uid()::TEXT));
+CREATE POLICY "checkpoint_insert_own" ON journey_checkpoints FOR INSERT WITH CHECK (journey_id IN (SELECT id FROM journeys WHERE user_id::TEXT = auth.uid()::TEXT));
+
+-- 11. JOURNEY WATCHERS TABLE
+CREATE POLICY "watcher_select_own" ON journey_watchers FOR SELECT USING (journey_id IN (SELECT id FROM journeys WHERE user_id::TEXT = auth.uid()::TEXT));
+CREATE POLICY "watcher_insert_any" ON journey_watchers FOR INSERT WITH CHECK (true);
+
+-- 12. SAFE ZONES TABLE
+CREATE POLICY "safezone_select_all" ON safe_zones FOR SELECT USING (is_active = TRUE);
+CREATE POLICY "safezone_insert_logged_in" ON safe_zones FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "safezone_update_own_submission" ON safe_zones FOR UPDATE USING (auth.uid()::TEXT = submitted_by::TEXT AND is_verified = FALSE) WITH CHECK (auth.uid()::TEXT = submitted_by::TEXT AND is_verified = FALSE);
+CREATE POLICY "safezone_upvote_any" ON safe_zones FOR UPDATE USING (is_active = TRUE AND is_verified = TRUE) WITH CHECK (is_active = TRUE AND is_verified = TRUE);
+
+-- 13. COMMUNITY REPORTS TABLE
+CREATE POLICY "report_select_active" ON community_reports FOR SELECT USING (is_active = TRUE);
+CREATE POLICY "report_insert_logged_in" ON community_reports FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "report_update_own" ON community_reports FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "report_delete_own" ON community_reports FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 14. REPORT VOTES TABLE
+CREATE POLICY "votes_select_any" ON report_votes FOR SELECT USING (true);
+CREATE POLICY "votes_insert_own" ON report_votes FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "votes_update_own" ON report_votes FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "votes_delete_own" ON report_votes FOR DELETE USING (auth.uid()::TEXT = user_id::TEXT);
+
+-- 15. HELP ME ALERTS TABLE
+CREATE POLICY "helpme_select_active" ON help_me_alerts FOR SELECT USING (status = 'active' AND created_at > CURRENT_TIMESTAMP - INTERVAL '10 minutes');
+CREATE POLICY "helpme_insert_logged_in" ON help_me_alerts FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+CREATE POLICY "helpme_update_own_resolve" ON help_me_alerts FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+
+-- 16. FAKE CALL LOGS TABLE
+CREATE POLICY "fakecall_select_own" ON fake_call_logs FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "fakecall_insert_own" ON fake_call_logs FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+
+-- 17. USER SETTINGS TABLE
+CREATE POLICY "settings_select_own" ON user_settings FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "settings_insert_own" ON user_settings FOR INSERT WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "settings_update_own" ON user_settings FOR UPDATE USING (auth.uid()::TEXT = user_id::TEXT) WITH CHECK (auth.uid()::TEXT = user_id::TEXT);
+
+-- 18. NOTIFICATIONS LOG TABLE
+CREATE POLICY "notiflog_select_own" ON notifications_log FOR SELECT USING (auth.uid()::TEXT = user_id::TEXT);
+CREATE POLICY "notiflog_insert_system" ON notifications_log FOR INSERT WITH CHECK (true);
+
+-- 19. SELF DEFENSE TIPS TABLE
+CREATE POLICY "tips_select_all" ON self_defense_tips FOR SELECT USING (is_active = TRUE);
+
+-- 20. SELF DEFENSE STEPS TABLE
+CREATE POLICY "steps_select_all" ON self_defense_steps FOR SELECT USING (true);
+
+-- 21. AI RISK SCORES TABLE
+CREATE POLICY "risk_select_active" ON area_risk_scores FOR SELECT USING (valid_until > CURRENT_TIMESTAMP);
+CREATE POLICY "risk_insert_system" ON area_risk_scores FOR INSERT WITH CHECK (true);
+CREATE POLICY "risk_update_system" ON area_risk_scores FOR UPDATE USING (true) WITH CHECK (true);
+CREATE POLICY "risk_delete_expired" ON area_risk_scores FOR DELETE USING (valid_until < CURRENT_TIMESTAMP);
+\`;
