@@ -1,0 +1,405 @@
+feGuard — HomeScreen.tsx (Vibrant Red Redesign)
+// ============================================================
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Animated,
+  Dimensions,
+  ScrollView,
+  Switch,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { NavigationProp } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
+import { colors, spacing, borderRadius, typography } from '../constants/theme';
+import { RootStackParamList, TabParamList } from '../../App';
+import MapView, { Marker } from '../components/MapShim';
+import { CompositeNavigationProp } from '@react-navigation/native';
+import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
+import { StackNavigationProp } from '@react-navigation/stack';
+
+interface Props {
+  navigation: CompositeNavigationProp<
+    BottomTabNavigationProp<TabParamList, 'Home'>,
+    StackNavigationProp<RootStackParamList>
+  >;
+  onLogin: () => void;
+}
+
+const { width } = Dimensions.get('window');
+
+export default function HomeScreen({ navigation }: Props) {
+  const [userName, setUserName] = useState('User');
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [userCoords, setUserCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const sosScale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }).start();
+    loadUserData();
+    loadLocation();
+
+    // Pulse animation for SOS
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(sosScale, { toValue: 1.05, duration: 800, useNativeDriver: true }),
+        Animated.timing(sosScale, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, []);
+
+  const loadUserData = async () => {
+    try {
+      const user = await AsyncStorage.getItem('safeguard_user');
+      if (user) {
+        const data = JSON.parse(user);
+        if (data?.name) setUserName(data.name);
+      }
+    } catch (e) {
+      console.warn('Failed to load user data:', e);
+    }
+  };
+
+  const loadLocation = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        setUserCoords({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+      }
+    } catch (e) {
+      console.warn('[Home] Location load failed:', e);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <LinearGradient colors={['#FFEBEE', '#FCE4EC', '#FFF0F5']} style={StyleSheet.absoluteFillObject} />
+      
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        
+        {/* ── Header ─────────────────────────────────────────────────── */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.headerTitle}>Welcome, Stay Safe!</Text>
+            <View style={styles.statusRow}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusText}>Emergency Services Active</Text>
+            </View>
+          </View>
+          <View style={styles.headerRight}>
+            <Text style={styles.modeLabel}>Dark Mode</Text>
+            <Switch
+              value={isDarkMode}
+              onValueChange={setIsDarkMode}
+              trackColor={{ false: '#E0E0E0', true: colors.primary }}
+              thumbColor="#FFFFFF"
+              style={{ transform: [{ scale: 0.8 }] }}
+            />
+          </View>
+        </View>
+
+        {/* ── Top Row Actions & SOS ─────────────────────────────────────── */}
+        <View style={styles.topRow}>
+          <View style={styles.leftActions}>
+            <TouchableOpacity style={styles.squareCard} onPress={() => navigation.navigate('LiveLocation')}>
+              <Text style={styles.cardEmoji}>📍</Text>
+              <Text style={styles.cardTitle}>Share Location</Text>
+              <View style={styles.checkIcon}><Text style={{fontSize: 10}}>✓</Text></View>
+            </TouchableOpacity>
+            
+            <TouchableOpacity style={styles.squareCard} onPress={() => navigation.navigate('FakeCall')}>
+              <Text style={styles.cardEmoji}>📞</Text>
+              <Text style={styles.cardTitle}>Fake Call</Text>
+              <View style={styles.checkIcon}><Text style={{fontSize: 10}}>✓</Text></View>
+            </TouchableOpacity>
+          </View>
+
+          <Animated.View style={{ transform: [{ scale: sosScale }] }}>
+            <TouchableOpacity style={styles.sosButton} onPress={() => navigation.navigate('SOS')} activeOpacity={0.9}>
+              <LinearGradient colors={['#FF1744', '#D50000']} style={styles.sosGradient}>
+                <Text style={styles.sosText}>SOS</Text>
+                <Text style={styles.sosSub}>TAP FOR HELP</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
+        </View>
+
+        {/* ── Quick Icon Bar ───────────────────────────────────────────── */}
+        <View style={styles.iconBar}>
+          {[
+            { label: 'Shake Alert', emoji: '🔔' },
+            { label: 'Nearby Support', emoji: '🏫' },
+            { label: 'Safe Routes', emoji: '🛡️' },
+            { label: 'Report Incident', emoji: '❗️' },
+          ].map((item, i) => (
+            <View key={i} style={styles.iconItem}>
+              <View style={styles.iconCircle}><Text style={{fontSize: 20}}>{item.emoji}</Text></View>
+              <Text style={styles.iconLabel}>{item.label}</Text>
+            </View>
+          ))}
+        </View>
+
+        {/* ── Live Location Tracking Card ──────────────────────────────── */}
+        <View style={styles.liveTrackingCard}>
+          <View style={styles.liveHeader}>
+            <Text style={styles.liveTitle}>Live Location Sharing</Text>
+            <Text style={styles.liveSub}>Sharing Location with: <Text style={{fontWeight: '700'}}>Mom, Riya</Text></Text>
+          </View>
+          
+          <View style={styles.miniMap}>
+             <MapView
+              style={StyleSheet.absoluteFillObject}
+              region={userCoords ? {
+                latitude: userCoords.latitude,
+                longitude: userCoords.longitude,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+              } : {
+                latitude: 28.6139,
+                longitude: 77.2090,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+              }}
+              scrollEnabled={false}
+              zoomEnabled={false}
+            >
+              {userCoords && <Marker coordinate={userCoords} pinColor={colors.primary} />}
+            </MapView>
+            <View style={styles.trackingBadge}>
+              <Text style={styles.trackingEmoji}>👤</Text>
+              <Text style={styles.trackingText}>You are being tracked</Text>
+            </View>
+          </View>
+
+          <TouchableOpacity style={styles.stopBtn} onPress={() => navigation.navigate('LiveLocation')}>
+            <Text style={styles.stopBtnText}>Stop Sharing</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* ── Bottom Grid ──────────────────────────────────────────────── */}
+        <View style={styles.bottomGrid}>
+          <View style={styles.fullWidthCard}>
+            <View style={styles.cardHeaderSmall}>
+              <Text style={{fontSize: 16}}>💡</Text>
+              <Text style={styles.gridTitle}>Safety Tips</Text>
+            </View>
+            <Text style={styles.gridDesc}>Learn how to stay safe</Text>
+            <TouchableOpacity style={styles.inlineBtn} onPress={() => navigation.navigate('Community')}>
+              <Text style={styles.inlineBtnText}>Read More</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.fullWidthCard}>
+            <View style={styles.cardHeaderSmall}>
+              <Text style={{fontSize: 16}}>⚠️</Text>
+              <Text style={[styles.gridTitle, {color: colors.danger}]}>Alert Zones Nearby</Text>
+            </View>
+            <Text style={styles.gridDesc}>3 Unsafe Areas Reported</Text>
+            <TouchableOpacity style={[styles.inlineBtn, {backgroundColor: colors.primary}]} onPress={() => navigation.navigate('Community')}>
+              <Text style={[styles.inlineBtnText, {color: '#FFF'}]}>View Alerts ⌵</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={{ height: 100 }} />
+      </ScrollView>
+
+      {/* ── Custom Bottom Nav (Visual Simulation of sidebar in image) ──── */}
+      <View style={styles.bottomNav}>
+        {[
+          { icon: '🏠', label: 'Home', active: true },
+          { icon: '👤', label: 'Contacts' },
+          { icon: '❕', label: 'Alert' },
+          { icon: '⋮', label: 'More' },
+        ].map((item, i) => (
+          <TouchableOpacity key={i} style={styles.navItem}>
+            <Text style={[styles.navIcon, item.active && { color: colors.primary }]}>{item.icon}</Text>
+            <Text style={[styles.navLabel, item.active && { color: colors.primary }]}>{item.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  scrollContent: { paddingTop: 40, paddingHorizontal: spacing.md },
+  
+  // Header
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+    paddingTop: 10,
+  },
+  headerTitle: { fontSize: 24, fontWeight: '800', color: colors.text },
+  statusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+  statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success, marginRight: 6 },
+  statusText: { fontSize: 13, color: colors.textSecondary, fontWeight: '600' },
+  headerRight: { alignItems: 'flex-end' },
+  modeLabel: { fontSize: 10, color: colors.textSecondary, fontWeight: '700', marginBottom: 2 },
+
+  // Top Row
+  topRow: { flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg },
+  leftActions: { flex: 1, gap: spacing.md },
+  squareCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+    borderWidth: 1.5,
+    borderColor: '#FCE4EC',
+    position: 'relative',
+  },
+  cardEmoji: { fontSize: 24, marginBottom: 4 },
+  cardTitle: { fontSize: 11, fontWeight: '700', color: colors.text, textAlign: 'center' },
+  checkIcon: {
+    position: 'absolute', top: 8, right: 8,
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: colors.success,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  sosButton: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    overflow: 'hidden',
+    borderWidth: 6,
+    borderColor: '#FFFFFF',
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+  },
+  sosGradient: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  sosText: { color: '#FFFFFF', fontSize: 40, fontWeight: '900', letterSpacing: 2 },
+  sosSub: { color: 'rgba(255,255,255,0.8)', fontSize: 10, fontWeight: '700', marginTop: -2 },
+
+  // Icon Bar
+  iconBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF',
+    borderRadius: 20,
+    padding: 15,
+    marginBottom: spacing.lg,
+    elevation: 2,
+    borderWidth: 1.5,
+    borderColor: '#FCE4EC',
+  },
+  iconItem: { alignItems: 'center', width: (width - 60) / 4 },
+  iconCircle: {
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: '#FCE4EC',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 6,
+  },
+  iconLabel: { fontSize: 9, fontWeight: '700', color: colors.textSecondary, textAlign: 'center' },
+
+  liveTrackingCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 15,
+    marginBottom: spacing.lg,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 3,
+    borderWidth: 1.5,
+    borderColor: '#FCE4EC',
+  },
+  liveHeader: { marginBottom: 10 },
+  liveTitle: { fontSize: 16, fontWeight: '800', color: colors.text },
+  liveSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  miniMap: {
+    height: 160,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#EEE',
+  },
+  trackingBadge: {
+    position: 'absolute', top: 10, left: 10,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  trackingEmoji: { fontSize: 12 },
+  trackingText: { fontSize: 10, fontWeight: '700', color: colors.text },
+  stopBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  stopBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
+
+  // Bottom Grid
+  bottomGrid: { flexDirection: 'row', gap: spacing.md },
+  fullWidthCard: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 15,
+    elevation: 2,
+    borderWidth: 1.5,
+    borderColor: '#FCE4EC',
+  },
+  cardHeaderSmall: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
+  gridTitle: { fontSize: 13, fontWeight: '800', color: colors.text },
+  gridDesc: { fontSize: 10, color: colors.textSecondary, marginBottom: 12 },
+  inlineBtn: {
+    backgroundColor: '#FCE4EC',
+    paddingVertical: 8,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  inlineBtnText: { fontSize: 11, fontWeight: '700', color: colors.primary },
+
+  bottomNav: {
+    position: 'absolute',
+    bottom: 25,
+    left: 20,
+    right: 20,
+    height: 70,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 35,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 15,
+    elevation: 10,
+    borderWidth: 1.5,
+    borderColor: '#FCE4EC',
+  },
+  navItem: { alignItems: 'center' },
+  navIcon: { fontSize: 20, color: '#BDBDBD' },
+  navLabel: { fontSize: 10, fontWeight: '700', color: '#BDBDBD', marginTop: 2 },
+});
